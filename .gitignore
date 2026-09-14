@@ -4,3 +4,11 @@
 *.bak
 # 旧打包（可重新生成）
 发布版.zip
+# 编辑备份 / 临时产物（可重新生成，不入库）
+*.pre_*
+*.bak_*
+*.old
+*.old.txt
+_update_backup/
+MAP工具箱/
+MAP工具箱V*.zip
