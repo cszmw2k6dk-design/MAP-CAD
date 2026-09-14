@@ -6404,8 +6404,7 @@
 ;;; GitHub 镜像前缀：raw 直连不通时按顺序尝试（失效可自行增删）
 (setq *PdfLayout_GhMirrors*
   (list "https://ghproxy.net/"
-        "https://gh-proxy.com/"
-        "https://ghfast.top/"))
+        "https://gh-proxy.com/"))
 
 ;;; 自动检查（安静模式）时最多尝试几个地址；nil = 全部尝试
 (setq *PdfLayout_GhAttempts* nil)
