@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.22
+;;; MAP工具箱 PdfLayout.lsp  v2.23
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -137,10 +137,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.22 - 对话框定义"
+"// MAP工具箱 v2.23 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.22\";"
+"  label = \"MAP工具箱 v2.23\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -4177,7 +4177,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.22 已加载")
+  (princ "\n  MAP工具箱 v2.23 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -6396,7 +6396,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.22")
+(setq *PdfLayout_Version* "2.23")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
@@ -6482,9 +6482,51 @@
   T)
 
 ;;; 执行系统命令：隐藏窗口；wait=T 时同步等待并返回退出码，失败返回 nil
+;;; 等待文件出现且大小稳定（毫秒）；用于 startapp 这种异步方式
+(defun PdfLayout_WaitFile (path ms / n s1 s2)
+  (setq n 0)
+  (while (and (< n (/ ms 200)) (not (PdfLayout_FileOK path)))
+    (PdfLayout_Sleep 200)
+    (setq n (1+ n)))
+  (if (PdfLayout_FileOK path)
+    (progn
+      (setq s1 (vl-file-size path) s2 -1 n 0)
+      (while (and (< n 25) (/= s1 s2))
+        (PdfLayout_Sleep 200)
+        (setq s2 s1)
+        (setq s1 (vl-file-size path))
+        (setq n (1+ n)))
+      T)
+    nil))
+
+;;; 把命令写进临时 bat 并用 AutoLISP 自带的 startapp 执行（不依赖 COM）
+;;; 把命令写进临时 bat 并用 AutoLISP 自带的 startapp 执行（不依赖 COM）
+;;; 三种 startapp 写法依次兜错（只在报错时换下一种，避免重复执行）
+(defun PdfLayout_RunBat (cmdline / bat f rc)
+  (setq bat (strcat (PdfLayout_TempDir) "pdfl_runner.bat"))
+  (vl-catch-all-apply 'vl-file-delete (list bat))
+  (setq f (vl-catch-all-apply 'open (list bat "w")))
+  (if (vl-catch-all-error-p f) (setq f nil))
+  (if f
+    (progn
+      (write-line "@echo off" f)
+      (write-line cmdline f)
+      (close f)
+      (setq rc (vl-catch-all-apply 'startapp (list (strcat "\"" bat "\""))))
+      (if (vl-catch-all-error-p rc)
+        (setq rc (vl-catch-all-apply 'startapp (list "cmd.exe" (strcat "/c \"" bat "\"")))))
+      (if (vl-catch-all-error-p rc)
+        (setq rc (vl-catch-all-apply 'startapp (list "cmd.exe" "/c" bat))))
+      (if (vl-catch-all-error-p rc) nil T))
+    nil))
+
+;;; 执行系统命令：优先 WScript.Shell（可同步等待、返回退出码）；
+;;; COM 不可用时退回 startapp + 批处理（异步，调用方用 PdfLayout_WaitFile 等结果）
 (defun PdfLayout_ShRun (cmd wait / wsh rc)
   (vl-load-com)
   (setq wsh (vl-catch-all-apply 'vlax-create-object (list "WScript.Shell")))
+  (if (vl-catch-all-error-p wsh) (setq wsh nil))
+  (if (null wsh) (setq wsh (vl-catch-all-apply 'vlax-create-object (list "Shell.Application"))))
   (if (vl-catch-all-error-p wsh) (setq wsh nil))
   (setq rc nil)
   (if wsh
@@ -6492,7 +6534,11 @@
       (setq rc (vl-catch-all-apply 'vlax-invoke-method (list wsh 'Run cmd 0 wait)))
       (if (vl-catch-all-error-p rc) (setq rc nil))
       (vl-catch-all-apply 'vlax-release-object (list wsh))))
-  rc)
+  (if (null rc)
+    (progn
+      (PdfLayout_RunBat cmd)
+      nil)
+    rc))
 
 ;;; 从右侧查找子串，返回 0 基下标（找不到返回 nil）
 (defun PdfLayout_LastPos (pat s / i p out)
@@ -6504,7 +6550,31 @@
   out)
 
 ;;; 用 MSXML 请求文本（带超时），断网/异常都返回 nil，绝不抛出
-(defun PdfLayout_HttpGetText (url / http res status)
+;;; 用系统自带 curl.exe 抓取 URL 到文件（Win10+ 自带；不依赖 COM）
+;;; 用系统自带 curl.exe 抓取 URL 到文件（不依赖 COM，可走 startapp 兜底）
+;;; 用系统自带 curl.exe 抓取 URL 到文件（不依赖 COM，可走 startapp 兜底）
+(defun PdfLayout_CurlFetch (url out / cmd)
+  (vl-catch-all-apply 'vl-file-delete (list out))
+  (setq cmd (strcat "curl.exe -L -s -S -A MAP-PdfLayout --connect-timeout 8 --max-time 45"
+                    " -o \"" out "\" \"" url "\""))
+  (princ (strcat "\n    (curl) " url))
+  (PdfLayout_ShRun cmd T)
+  (PdfLayout_WaitFile out 25000))
+
+;;; 用 PowerShell 抓取 URL 到文件（强制 TLS1.2，兼容老 .NET 默认协议）
+;;; 用 PowerShell 抓取 URL 到文件（强制 TLS1.2；不依赖 CAD 的 COM）
+;;; 用 PowerShell 抓取 URL 到文件（强制 TLS1.2；不依赖 CAD 的 COM）
+(defun PdfLayout_PsFetch (url out / cmd)
+  (vl-catch-all-apply 'vl-file-delete (list out))
+  (setq cmd (strcat "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
+                    "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
+                    "Invoke-WebRequest -Uri '" url "' -UseBasicParsing -TimeoutSec 45 -OutFile '" out "'\""))
+  (princ (strcat "\n    (powershell) " url))
+  (PdfLayout_ShRun cmd T)
+  (PdfLayout_WaitFile out 25000))
+
+;;; 读取文本：先试 MSXML（进程内最快），失败自动改用 curl.exe / PowerShell
+(defun PdfLayout_HttpGetText (url / http res status out)
   (vl-load-com)
   (setq http (vl-catch-all-apply 'vlax-create-object (list "MSXML2.XMLHTTP")))
   (if (vl-catch-all-error-p http) (setq http nil))
@@ -6513,7 +6583,7 @@
     (progn
       (vl-catch-all-apply
         '(lambda ()
-           (vlax-invoke-method http 'setTimeouts 3000 3000 6000 12000)
+           (vl-catch-all-apply 'vlax-invoke-method (list http 'setTimeouts 3000 3000 6000 12000))
            (vlax-invoke-method http 'open "GET" url :vlax-false)
            (vl-catch-all-apply 'vlax-invoke-method
              (list http 'setRequestHeader "User-Agent" "MAP-PdfLayout"))
@@ -6523,7 +6593,15 @@
              (setq res (vlax-get-property http 'responseText))))
         nil)
       (vl-catch-all-apply 'vlax-release-object (list http))))
-  res)
+  (if res
+    res
+    (progn
+      (setq out (strcat (PdfLayout_TempDir) "pdfl_http.txt"))
+      (vl-catch-all-apply 'vl-file-delete (list out))
+      (cond
+        ((PdfLayout_CurlFetch url out) (PdfLayout_ReadFile out))
+        ((PdfLayout_PsFetch url out) (PdfLayout_ReadFile out))
+        (t nil)))))
 
 ;;; 读取本地/UNC 文件内容（用于共享盘更新源），失败返回 nil
 (defun PdfLayout_ReadFile (path / p f line out)
@@ -6540,6 +6618,8 @@
 ;;; ============ GitHub 更新源 ============
 
 ;;; 解析 "github:owner/repo[@branch][:path]" -> (owner repo branch path)，非法返回 nil
+;;; 解析 "github:owner/repo[@branch][:path]" -> (owner repo branch path)，非法返回 nil
+;;; 注意：vl-string-search 返回 0 基下标，"@" 前面有 pa 个字符，所以取 (substr s 1 pa)
 (defun PdfLayout_GhParse (s / pa pb rest owner repo branch path slash)
   (setq s (vl-string-trim " " s))
   (if (>= (strlen s) 7) (setq s (substr s 8)))     ; 去掉 "github:"
@@ -6553,11 +6633,11 @@
         (progn (setq branch (substr rest 1 pb))
                (setq path (substr rest (+ pb 2))))
         (setq branch rest))
-      (setq s (substr s 1 (1- pa)))))
+      (setq s (if (> pa 0) (substr s 1 pa) ""))))
   (setq pb (vl-string-search ":" s))
   (if pb
     (progn (setq path (substr s (+ pb 2)))
-           (setq s (substr s 1 (1- pb)))))
+           (setq s (if (> pb 0) (substr s 1 pb) ""))))
   (setq slash (vl-string-search "/" s))
   (if (and slash (> slash 0) (< slash (strlen s))
            (not (vl-string-search "/" (substr s (+ slash 2)))))
@@ -6724,6 +6804,7 @@
   s)
 
 ;;; 下载二进制文件（MSXML + ADODB.Stream），成功返回 T
+;;; 下载二进制：先试 MSXML + ADODB.Stream，失败自动改用 curl.exe / PowerShell
 (defun PdfLayout_HttpDownload (url path / http st status)
   (vl-load-com)
   (vl-catch-all-apply 'vl-file-delete (list path))
@@ -6733,7 +6814,7 @@
     (progn
       (vl-catch-all-apply
         '(lambda ()
-           (vlax-invoke-method http 'setTimeouts 6000 6000 20000 600000)
+           (vl-catch-all-apply 'vlax-invoke-method (list http 'setTimeouts 6000 6000 20000 600000))
            (vlax-invoke-method http 'open "GET" url :vlax-false)
            (vl-catch-all-apply 'vlax-invoke-method
              (list http 'setRequestHeader "User-Agent" "MAP-PdfLayout"))
@@ -6749,9 +6830,109 @@
                (vlax-invoke-method st 'Close)
                (vl-catch-all-apply 'vlax-release-object (list st)))))
         nil)
-      (vl-catch-all-apply 'vlax-release-object (list http)))
-    (princ "\n  无法创建下载组件(MSXML2.XMLHTTP)。"))
-  (PdfLayout_FileOK path))
+      (vl-catch-all-apply 'vlax-release-object (list http))))
+  (if (PdfLayout_FileOK path)
+    T
+    (cond
+      ((PdfLayout_CurlFetch url path) T)
+      ((PdfLayout_PsFetch url path) T)
+      (t nil))))
+
+;;;-------------------------------------------------------------
+;;; 诊断命令 UPDDIAG：逐个测试 CAD 内的联网方式，看哪一种可用
+;;;-------------------------------------------------------------
+;;; 写文件自检
+(defun PdfLayout_DiagWrite (/ p f)
+  (setq p (strcat (PdfLayout_TempDir) "pdfl_wtest.txt"))
+  (vl-catch-all-apply 'vl-file-delete (list p))
+  (setq f (vl-catch-all-apply 'open (list p "w")))
+  (if (vl-catch-all-error-p f) (setq f nil))
+  (if f (progn (write-line "ok" f) (close f)))
+  (PdfLayout_FileOK p))
+
+;;; 单个 COM 组件探测
+(defun PdfLayout_DiagCom (progid / o)
+  (princ (strcat "\n   " progid))
+  (setq o (vl-catch-all-apply 'vlax-create-object (list progid)))
+  (cond
+    ((vl-catch-all-error-p o) (princ (strcat " ... 失败 - " (vl-catch-all-error-message o))))
+    ((null o) (princ " ... 失败（返回 nil）"))
+    (t (princ " ... OK")
+       (vl-catch-all-apply 'vlax-release-object (list o))))
+  (princ))
+
+;;;-------------------------------------------------------------
+;;; 诊断命令 UPDDIAG：逐个探测 CAD 里的联网能力
+;;;-------------------------------------------------------------
+(defun c:UPDDIAG (/ url out echo ok txt)
+  (vl-load-com)
+  (setq url "https://raw.githubusercontent.com/cszmw2k6dk-design/MAP-CAD/main/version.json")
+  (setq out (strcat (PdfLayout_TempDir) "pdfl_diag.json"))
+  (setq echo (strcat (PdfLayout_TempDir) "pdfl_diag_echo.txt"))
+  (princ "\n\n===== 在线更新联网诊断 =====")
+  (princ (strcat "\n CAD版本   : " (vl-princ-to-string (vl-catch-all-apply 'getvar (list "ACADVER")))))
+  (princ (strcat "\n 临时目录  : " (PdfLayout_TempDir)))
+  (princ (strcat "\n 写文件    : " (if (PdfLayout_DiagWrite) "OK" "失败")))
+  (princ (strcat "\n 插件目录  : " (if (PdfLayout_InstallDir) (PdfLayout_InstallDir) "(未识别)")))
+
+  (princ "\n [1] COM 组件探测")
+  (foreach p (list "WScript.Shell" "MSXML2.XMLHTTP" "MSXML2.ServerXMLHTTP.6.0"
+                   "WinHttp.WinHttpRequest.5.1" "ADODB.Stream" "Shell.Application")
+    (PdfLayout_DiagCom p))
+
+  (princ "\n [2] startapp（AutoLISP 自带，不依赖 COM）")
+  (vl-catch-all-apply 'vl-file-delete (list echo))
+  (setq ok (PdfLayout_RunBat (strcat "echo startapp-ok > \"" echo "\"")))
+  (princ (strcat "\n   调用 bat  : " (if ok "OK" "失败")
+                 " ; 输出文件 : " (if (PdfLayout_WaitFile echo 20000) "OK" "失败")))
+
+  (princ "\n [3] curl.exe 通道")
+  (princ (strcat "\n   结果      : "
+                 (if (PdfLayout_CurlFetch url out)
+                   (strcat "OK（" (itoa (vl-file-size out)) " 字节）") "失败")))
+
+  (princ "\n [4] PowerShell 通道")
+  (princ (strcat "\n   结果      : "
+                 (if (PdfLayout_PsFetch url out)
+                   (strcat "OK（" (itoa (vl-file-size out)) " 字节）") "失败")))
+
+  (princ "\n [5] MSXML 直接请求")
+  (setq txt (PdfLayout_MsxmlProbe url))
+  (princ (strcat "\n   结果      : " txt))
+
+  (princ "\n [6] 完整读一次版本清单")
+  (setq txt (PdfLayout_GetSource *PdfLayout_UpdateUrl*))
+  (princ (strcat "\n   结果      : "
+                 (if txt
+                   (strcat "OK，" (itoa (strlen txt)) " 字符，线上版本 "
+                           (if (PdfLayout_JsonVal txt "version") (PdfLayout_JsonVal txt "version") "?"))
+                   "失败")))
+  (princ "\n===== 诊断结束（把 [1]~[6] 截图发我）=====")
+  (princ))
+
+;;; MSXML 分步探测，返回一句描述
+(defun PdfLayout_MsxmlProbe (url / http o e1 e2 e3 st txt)
+  (setq o (vl-catch-all-apply 'vlax-create-object (list "MSXML2.XMLHTTP")))
+  (cond
+    ((vl-catch-all-error-p o) (strcat "创建失败 - " (vl-catch-all-error-message o)))
+    ((null o) "创建失败（nil）")
+    (t
+     (setq e1 (vl-catch-all-apply 'vlax-invoke-method (list o 'setTimeouts 3000 3000 6000 12000)))
+     (setq e2 (vl-catch-all-apply 'vlax-invoke-method (list o 'open "GET" url :vlax-false)))
+     (setq e3 (if (vl-catch-all-error-p e2)
+                e2
+                (vl-catch-all-apply 'vlax-invoke-method (list o 'send))))
+     (cond
+       ((vl-catch-all-error-p e2)
+        (strcat "创建OK，open 失败 - " (vl-catch-all-error-message e2)))
+       ((vl-catch-all-error-p e3)
+        (strcat "创建OK，send 失败 - " (vl-catch-all-error-message e3)))
+       (t
+        (setq st (vl-catch-all-apply 'vlax-get-property (list o 'status)))
+        (setq txt (vl-catch-all-apply 'vlax-get-property (list o 'responseText)))
+        (vl-catch-all-apply 'vlax-release-object (list o))
+        (strcat "创建OK，status=" (if (vl-catch-all-error-p st) "读取失败" (vl-princ-to-string st))
+                "，文本长度=" (if (vl-catch-all-error-p txt) "读取失败" (itoa (strlen txt)))))))))
 
 ;;; 依次尝试多个 URL 下载到 path
 (defun PdfLayout_DownloadAny (urls path / done u)
@@ -6784,7 +6965,8 @@
     nil))
 
 ;;; 解压 zip 到 dest（PowerShell 优先，失败退回 Shell.Application）
-(defun PdfLayout_Unzip (zip dest / cmd ok sh src dst)
+;;; 解压 zip 到 dest（PowerShell 优先，失败退回 Shell.Application；均带等待轮询）
+(defun PdfLayout_Unzip (zip dest / cmd ok sh src dst n)
   (setq ok nil)
   (if (PdfLayout_FileOK zip)
     (progn
@@ -6792,6 +6974,10 @@
                         "Expand-Archive -LiteralPath '" zip "' -DestinationPath '"
                         dest "' -Force\""))
       (PdfLayout_ShRun cmd T)
+      (setq n 0)
+      (while (and (< n 150) (not (PdfLayout_DirOK dest)))
+        (PdfLayout_Sleep 200)
+        (setq n (1+ n)))
       (setq ok (PdfLayout_DirOK dest))
       (if (not ok)
         (progn
@@ -6808,7 +6994,10 @@
                    (vl-catch-all-apply 'vlax-release-object (list src))
                    (vl-catch-all-apply 'vlax-release-object (list sh)))
                 nil)
-              (PdfLayout_Sleep 2000)
+              (setq n 0)
+              (while (and (< n 100) (not (PdfLayout_DirOK dest)))
+                (PdfLayout_Sleep 200)
+                (setq n (1+ n)))
               (setq ok (PdfLayout_DirOK dest))))))))
   ok)
 
@@ -6843,13 +7032,71 @@
   T)
 
 ;;; 当前插件安装目录（PdfLayout.lsp 所在目录，以反斜杠结尾）；取不到返回 nil
+;;; 手动指定的安装目录（UPDDIR 设置；留空则自动探测）
+(setq *PdfLayout_UpdateDir* nil)
+
+;;; 该目录里有没有 PdfLayout.lsp
+(defun PdfLayout_DirHasLsp (d)
+  (and d (/= d "")
+       (PdfLayout_FileOK (strcat (vl-string-right-trim "\\" d) "\\PdfLayout.lsp"))))
+
+;;; 按分隔符拆字符串
+(defun PdfLayout_SplitString (s sep / lst pos rest)
+  (setq lst nil rest s pos (vl-string-search sep rest))
+  (while pos
+    (setq lst (append lst (list (substr rest 1 pos))))
+    (setq rest (substr rest (+ pos 2)))
+    (setq pos (vl-string-search sep rest)))
+  (append lst (list rest)))
+
+;;; 在 CAD 支持路径（ACADPREFIX）里找装了 PdfLayout.lsp 的目录
+(defun PdfLayout_ScanSupportDir (/ pre lst p found)
+  (setq pre (vl-catch-all-apply 'getvar (list "ACADPREFIX")))
+  (if (and (stringp pre) (/= pre ""))
+    (foreach p (PdfLayout_SplitString pre ";")
+      (if (and (not found) (PdfLayout_DirHasLsp p))
+        (setq found (strcat (vl-string-right-trim "\\" p) "\\")))))
+  found)
+
+;;; 当前插件安装目录（以反斜杠结尾）：优先手动指定，其次 LSP 自身目录、支持路径、findfile
 (defun PdfLayout_InstallDir (/ d f)
-  (setq d (if (and *PdfLayout_LspDir* (/= *PdfLayout_LspDir* "")) *PdfLayout_LspDir* nil))
-  (if (or (null d) (not (PdfLayout_FileOK (strcat d "\\PdfLayout.lsp"))))
+  (cond
+    ((PdfLayout_DirHasLsp *PdfLayout_UpdateDir*) (strcat (vl-string-right-trim "\\" *PdfLayout_UpdateDir*) "\\"))
+    ((PdfLayout_DirHasLsp (if (boundp '*PdfLayout_LspDir*) *PdfLayout_LspDir* nil))
+     (strcat (vl-string-right-trim "\\" *PdfLayout_LspDir*) "\\"))
+    ((setq d (PdfLayout_ScanSupportDir)) d)
+    ((and (setq f (findfile "PdfLayout.lsp")) (PdfLayout_FileOK f))
+     (strcat (vl-filename-directory f) "\\"))
+    (t nil)))
+
+;;; 自动找不到时，让用户手输一次安装目录
+(defun PdfLayout_AskInstallDir (/ d)
+  (setq d (getstring T "\n请输入装有 PdfLayout.lsp 的文件夹（直接回车取消）: "))
+  (if (and d (/= d ""))
     (progn
-      (setq f (findfile "PdfLayout.lsp"))
-      (if (and f (PdfLayout_FileOK f)) (setq d (vl-filename-directory f)))))
-  (if (and d (/= d "")) (strcat (vl-string-right-trim "\\" d) "\\") nil))
+      (setq d (strcat (vl-string-right-trim "\\" d) "\\"))
+      (if (PdfLayout_DirHasLsp d)
+        (progn
+          (setq *PdfLayout_UpdateDir* d)
+          (princ (strcat "\nPDFUPDATE: 安装目录已设为 " d))
+          d)
+        (progn
+          (princ (strcat "\nPDFUPDATE: 该目录里没有 PdfLayout.lsp: " d))
+          nil)))
+    nil))
+
+;;; UPDDIR：查看 / 手动指定安装目录
+(defun c:UPDDIR (/ d)
+  (princ (strcat "\n当前安装目录: " (if (PdfLayout_InstallDir) (PdfLayout_InstallDir) "(未识别)")))
+  (princ (strcat "\n更新源      : " (if (boundp '*PdfLayout_UpdateUrl*) *PdfLayout_UpdateUrl* "(未加载插件)")))
+  (setq d (getstring T "\n输入新的安装目录（装有 PdfLayout.lsp；直接回车不改）: "))
+  (if (and d (/= d ""))
+    (progn
+      (setq d (strcat (vl-string-right-trim "\\" d) "\\"))
+      (if (PdfLayout_DirHasLsp d)
+        (progn (setq *PdfLayout_UpdateDir* d) (princ (strcat "\nPDFUPDATE: 已设为 " d)))
+        (princ (strcat "\nPDFUPDATE: 该目录里没有 PdfLayout.lsp: " d)))))
+  (princ))
 
 ;;; 备份 dst 目录下与 src 同名的文件到 dst\_update_backup\v<cur>_<时间>，返回备份目录
 (defun PdfLayout_BackupFiles (src dst cur / stamp bak files f)
@@ -6865,11 +7112,14 @@
   bak)
 
 ;;; 下载 + 校验 + 解压 + 备份 + 覆盖；成功返回 T
+;;; 下载 + 校验 + 解压 + 备份 + 覆盖；成功返回 T
+;;; 目录自动识别不到时会提示手输一次（UPDDIR 也可预设）
 (defun PdfLayout_ApplyUpdate (ver url md5 / tmp zip ext srcFile srcDir dst upx ok)
   (setq ok nil)
   (setq dst (PdfLayout_InstallDir))
+  (if (null dst) (setq dst (PdfLayout_AskInstallDir)))
   (if (null dst)
-    (princ "\nPDFUPDATE: 找不到当前 PdfLayout.lsp 所在目录，无法自动安装；请手动解压覆盖。")
+    (princ "\nPDFUPDATE: 没有安装目录，已取消。可先输入 UPDDIR 指定，或手动解压覆盖。")
     (progn
       (setq tmp (strcat (PdfLayout_TempDir) "pdfl_upd_" ver "\\"))
       (setq zip (strcat tmp "package.zip"))
