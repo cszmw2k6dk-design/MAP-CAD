@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.23
+;;; MAP工具箱 PdfLayout.lsp  v2.24
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -137,10 +137,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.23 - 对话框定义"
+"// MAP工具箱 v2.24 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.23\";"
+"  label = \"MAP工具箱 v2.24\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -4177,7 +4177,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.23 已加载")
+  (princ "\n  MAP工具箱 v2.24 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -6396,7 +6396,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.23")
+(setq *PdfLayout_Version* "2.24")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
@@ -7016,20 +7016,55 @@
           found)))))
 
 ;;; 递归复制目录
-(defun PdfLayout_CopyTree (src dst / files subs f d)
-  (vl-catch-all-apply 'vl-mkdir (list dst))
-  (setq files (vl-catch-all-apply 'vl-directory-files (list src nil 1)))
+;;; 目录路径规范化：统一成一个结尾反斜杠（避免出现 \\ 双反斜杠）
+(defun PdfLayout_NormDir (d)
+  (if (and d (/= d ""))
+    (strcat (vl-string-right-trim "\\" (vl-string-right-trim "/" d)) "\\")
+    d))
+
+;;; 纯 LISP 递归复制（兜底方案；路径已规范化）
+(defun PdfLayout_CopyTree (src dst / s1 d1 files subs f d)
+  (setq s1 (PdfLayout_NormDir src) d1 (PdfLayout_NormDir dst))
+  (vl-catch-all-apply 'vl-mkdir (list (vl-string-right-trim "\\" d1)))
+  (setq files (vl-catch-all-apply 'vl-directory-files (list s1 nil 1)))
   (if (listp files)
     (foreach f files
-      (if (PdfLayout_FileOK (strcat src "\\" f))
-        (vl-catch-all-apply 'vl-file-copy
-          (list (strcat src "\\" f) (strcat dst "\\" f) nil)))))
-  (setq subs (vl-catch-all-apply 'vl-directory-files (list src nil -1)))
+      (if (and (/= f ".") (/= f "..") (PdfLayout_FileOK (strcat s1 f)))
+        (vl-catch-all-apply 'vl-file-copy (list (strcat s1 f) (strcat d1 f) nil)))))
+  (setq subs (vl-catch-all-apply 'vl-directory-files (list s1 nil -1)))
   (if (listp subs)
     (foreach d subs
       (if (and (/= d ".") (/= d ".."))
-        (PdfLayout_CopyTree (strcat src "\\" d) (strcat dst "\\" d)))))
+        (PdfLayout_CopyTree (strcat s1 d) (strcat d1 d)))))
   T)
+
+;;; 校验：src 里有的关键文件，dst 里必须同名同大小
+(defun PdfLayout_SameSize (src dst name / a b)
+  (setq a (PdfLayout_FileOK (strcat (PdfLayout_NormDir src) name)))
+  (setq b (PdfLayout_FileOK (strcat (PdfLayout_NormDir dst) name)))
+  (if (null a) T
+    (if (null b) nil
+      (= (vl-file-size (strcat (PdfLayout_NormDir src) name))
+         (vl-file-size (strcat (PdfLayout_NormDir dst) name))))))
+
+(defun PdfLayout_CopyOK (src dst)
+  (and (PdfLayout_SameSize src dst "PdfLayout.lsp")
+       (PdfLayout_SameSize src dst "PdfLayout.dcl")
+       (PdfLayout_SameSize src dst "PdfLayout.cuix")))
+
+;;; 覆盖复制：优先用系统 xcopy（不依赖 CAD 的目录列举/文件函数），失败再退回纯 LISP
+(defun PdfLayout_CopyTreeX (src dst / s1 d1 cmd)
+  (setq s1 (vl-string-right-trim "\\" (vl-string-right-trim "/" src)))
+  (setq d1 (vl-string-right-trim "\\" (vl-string-right-trim "/" dst)))
+  (princ "\n  正在复制文件...")
+  (setq cmd (strcat "cmd /c xcopy \"" s1 "\" \"" d1 "\" /E /Y /I /Q >nul"))
+  (PdfLayout_ShRun cmd T)
+  (if (PdfLayout_CopyOK src dst)
+    T
+    (progn
+      (princ "（xcopy 未生效，改用 LISP 复制）")
+      (PdfLayout_CopyTree src dst)
+      (PdfLayout_CopyOK src dst))))
 
 ;;; 当前插件安装目录（PdfLayout.lsp 所在目录，以反斜杠结尾）；取不到返回 nil
 ;;; 手动指定的安装目录（UPDDIR 设置；留空则自动探测）
@@ -7114,6 +7149,8 @@
 ;;; 下载 + 校验 + 解压 + 备份 + 覆盖；成功返回 T
 ;;; 下载 + 校验 + 解压 + 备份 + 覆盖；成功返回 T
 ;;; 目录自动识别不到时会提示手输一次（UPDDIR 也可预设）
+;;; 下载 + 校验 + 解压 + 备份 + 覆盖；成功返回 T
+;;; 目录自动识别不到时会提示手输一次（UPDDIR 也可预设）
 (defun PdfLayout_ApplyUpdate (ver url md5 / tmp zip ext srcFile srcDir dst upx ok)
   (setq ok nil)
   (setq dst (PdfLayout_InstallDir))
@@ -7159,7 +7196,11 @@
                       (setq srcDir (strcat (vl-filename-directory srcFile) "\\"))
                       (princ (strcat "\n  已备份旧文件: "
                                      (PdfLayout_BackupFiles srcDir dst *PdfLayout_Version*)))
-                      (PdfLayout_CopyTree srcDir dst)
+                      (PdfLayout_CopyTreeX srcDir dst)
+                      (if (not (PdfLayout_CopyOK srcDir dst))
+                        (progn
+                          (setq ok nil)
+                          (princ (strcat "\n  覆盖失败：文件没能全部写进 " dst "（目录只读/被占用，或选错目录）"))))
                       (setq upx (PdfLayout_FindInTree ext "PackageContents.xml" 3))
                       (if (and upx (PdfLayout_FileOK (strcat dst "..\\PackageContents.xml")))
                         (progn
