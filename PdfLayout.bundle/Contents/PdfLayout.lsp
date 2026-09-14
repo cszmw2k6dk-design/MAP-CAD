@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.24
+;;; MAP工具箱 PdfLayout.lsp  v2.25
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -137,10 +137,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.24 - 对话框定义"
+"// MAP工具箱 v2.25 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.24\";"
+"  label = \"MAP工具箱 v2.25\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -4177,7 +4177,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.24 已加载")
+  (princ "\n  MAP工具箱 v2.25 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -6396,7 +6396,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.24")
+(setq *PdfLayout_Version* "2.25")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
@@ -6738,7 +6738,7 @@
 
 ;;; ============ 检查更新 ============
 
-(defun PdfLayout_UpdateCheck (quiet / txt ver url notes md5 minv cur r force u i)
+(defun PdfLayout_UpdateCheck (quiet / txt ver url notes md5 minv cur r force u i ans)
   (setq cur *PdfLayout_Version*)
   ;; 自动检查（安静模式）只试前两个地址，避免拖慢 CAD 启动
   (setq *PdfLayout_GhAttempts* (if quiet 2 nil))
@@ -6774,7 +6774,42 @@
                   (foreach u (cdr (PdfLayout_AssetUrls url))
                     (setq i (1+ i))
                     (if (<= i 2) (princ (strcat "\n  镜像" (itoa i) ": " u))))))
-              (princ "\n  下载更新包: PDFUPDATEDL    自动安装: PDFUPDATEINST"))
+              (princ "\n  下载更新包: PDFUPDATEDL    自动安装: PDFUPDATEINST    弹窗开关: PDFUPDATEPOP")
+              ;; 弹窗询问（自动检查与手动检查都会弹，一次会话只弹一次）
+              (if (and (boundp '*PdfLayout_UpdatePopup*) *PdfLayout_UpdatePopup*
+                       (not *PdfLayout_PopupDone*))
+                (progn
+                  (setq *PdfLayout_PopupDone* T)
+                  (setq ans (PdfLayout_Popup
+                              "MAP工具箱 有新版本"
+                              (strcat "发现新版本 v" ver "（当前 v" cur "）"
+                                      (if force "\n【必需更新】" "")
+                                      (if (and notes (/= notes ""))
+                                        (strcat "\n\n更新说明：\n" notes) "")
+                                      "\n\n是否现在下载并自动更新？"
+                                      "\n（先下载并校验 MD5，安装前自动备份旧文件）")
+                              (if force 300 60)
+                              36))
+                  (cond
+                    ((= ans 6)
+                     (princ "\nPDFUPDATE: 已选择立即更新，开始下载...")
+                     (if (PdfLayout_UpdateRun ver url md5)
+                       (PdfLayout_Popup "MAP工具箱 更新完成"
+                                        (strcat "已更新到 v" ver "。"
+                                                "\n建议重启 CAD，确保工具栏和命令完全生效。")
+                                        60 64)
+                       (PdfLayout_Popup "MAP工具箱 更新未完成"
+                                        (strcat "下载或安装失败，原文件没有被破坏。"
+                                                "\n可稍后重试：命令行输入 PDFUPDATEINST，"
+                                                "\n或手动解压更新包覆盖。")
+                                        60 48)))
+                    ((= ans 7)
+                     (princ "\nPDFUPDATE: 已选择稍后更新（随时可输入 PDFUPDATEINST 更新）。"))
+                    ((= ans 2)
+                     (princ "\nPDFUPDATE: 已取消。"))
+                    ((= ans -1)
+                     (princ "\nPDFUPDATE: 弹窗超时未选择，按稍后处理。"))
+                    (t nil)))))
             (if (not quiet) (princ (strcat "\nPDFUPDATE: 当前版本 v" cur " 已是最新。")))))
         (if (not quiet) (princ "\nPDFUPDATE: 检查更新失败，请检查网络或更新源地址。")))))
   (princ))
@@ -7258,6 +7293,7 @@
                             *PdfLayout_RemoteMd5*))
   (princ))
 
+;;; PDFUPDATEINST：命令行确认后更新（弹窗也可以走这里）
 (defun c:pdfupdateinst (/ ans)
   (if (PdfLayout_RemoteReady)
     (progn
@@ -7268,16 +7304,58 @@
                                   " 覆盖安装到当前插件目录？[是(Y)/否(N)] <N>: ")))
       (if (= ans "Y")
         (progn
-          (if (PdfLayout_ApplyUpdate *PdfLayout_RemoteVer* *PdfLayout_RemoteUrl*
-                                     *PdfLayout_RemoteMd5*)
-            (progn
-              (setq *PdfLayout_Version* *PdfLayout_RemoteVer*)
-              (vl-catch-all-apply 'load
-                (list (strcat (PdfLayout_InstallDir) "PdfLayout.lsp")))
-              (princ (strcat "\nPDFUPDATE: 已更新到 v" *PdfLayout_RemoteVer*
-                             "，建议重启 CAD 以确保工具栏与命令完全生效。")))
+          (setq *PdfLayout_PopupDone* T)      ; 命令行已经确认过，不再弹窗
+          (if (PdfLayout_UpdateRun *PdfLayout_RemoteVer* *PdfLayout_RemoteUrl*
+                                   *PdfLayout_RemoteMd5*)
+            (princ (strcat "\nPDFUPDATE: 已更新到 v" *PdfLayout_RemoteVer*
+                           "，建议重启 CAD 以确保工具栏与命令完全生效。"))
             (princ "\nPDFUPDATE: 安装未完成，原文件未被破坏。")))
         (princ "\nPDFUPDATE: 已取消。"))))
+  (princ))
+
+;;; 加载完成后静默自动检查（一次会话只查一次）
+;;;-------------------------------------------------------------
+;;; 更新提示弹窗（Windows 消息框，不依赖 DCL 文件）
+;;;-------------------------------------------------------------
+(setq *PdfLayout_UpdatePopup* T)     ; 发现新版本时是否弹窗询问
+(setq *PdfLayout_PopupDone* nil)     ; 本会话是否已经弹过
+
+;;; 弹窗：buttons 4=是/否、3=是/否/取消，图标 32=问号 48=警告 64=信息
+;;; 返回 6=是 7=否 2=取消 -1=超时未选择；弹不出来返回 nil
+(defun PdfLayout_Popup (title text secs buttons / wsh rc)
+  (vl-load-com)
+  (setq wsh (vl-catch-all-apply 'vlax-create-object (list "WScript.Shell")))
+  (if (vl-catch-all-error-p wsh) (setq wsh nil))
+  (setq rc nil)
+  (if wsh
+    (progn
+      (setq rc (vl-catch-all-apply 'vlax-invoke-method
+                 (list wsh 'Popup text secs title buttons)))
+      (if (vl-catch-all-error-p rc) (setq rc nil))
+      (vl-catch-all-apply 'vlax-release-object (list wsh))))
+  (if (null rc)
+    (progn (vl-catch-all-apply 'alert (list (strcat title "\n\n" text))) nil)
+    rc))
+
+;;; 静默执行更新（不提问）：下载 → 校验 → 备份 → 覆盖 → 重载；成功返回 T
+(defun PdfLayout_UpdateRun (ver url md5)
+  (if (PdfLayout_ApplyUpdate ver url md5)
+    (progn
+      (setq *PdfLayout_Version* ver)
+      (vl-catch-all-apply 'load (list (strcat (PdfLayout_InstallDir) "PdfLayout.lsp")))
+      (setq *PdfLayout_RemoteVer* nil)
+      T)
+    nil))
+
+;;; PDFUPDATEPOP：开关"发现新版本时弹窗询问"
+(defun c:pdfupdatepop (/ ans)
+  (initget "Y N")
+  (setq ans (getkword (strcat "\n发现新版本时是否弹窗询问？当前: "
+                             (if *PdfLayout_UpdatePopup* "开" "关")
+                             " [开(Y)/关(N)] <不变>: ")))
+  (if (= ans "Y") (setq *PdfLayout_UpdatePopup* T))
+  (if (= ans "N") (setq *PdfLayout_UpdatePopup* nil))
+  (princ (strcat "\nPDFUPDATE: 弹窗提示已" (if *PdfLayout_UpdatePopup* "开启" "关闭") "。"))
   (princ))
 
 ;;; 加载完成后静默自动检查（一次会话只查一次）
