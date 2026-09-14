@@ -1,7 +1,7 @@
 ﻿# publish_github.ps1 - one-click release to GitHub (build bundle + manifest + GitHub Release)
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File publish_github.ps1 -Version 2.22 -Repo CSZMW2K6DK-Design/MAP-CAD -Note "fix ..."
+#   powershell -ExecutionPolicy Bypass -File publish_github.ps1 -Version 2.22 -Repo cszmw2k6dk-design/MAP-CAD -Note "fix ..."
 #
 # What it does:
 #   1) calls make_release.ps1 in GitHub mode  -> clean zip + version.json (compact JSON)

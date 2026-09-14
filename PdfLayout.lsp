@@ -6397,7 +6397,7 @@
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
 (setq *PdfLayout_Version* "2.22")
-(setq *PdfLayout_UpdateUrl* "github:CSZMW2K6DK-Design/MAP-CAD@main")
+(setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
 
