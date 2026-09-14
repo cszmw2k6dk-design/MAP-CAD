@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.26
+;;; MAP工具箱 PdfLayout.lsp  v2.27
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -137,10 +137,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.26 - 对话框定义"
+"// MAP工具箱 v2.27 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.26\";"
+"  label = \"MAP工具箱 v2.27\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -2904,6 +2904,9 @@
               ((= k "LbdSheet") (setq *PdfLayout_LbdSheet* v))
               ((= k "BrushMode") (setq *PdfLayout_BrushMode* (if (= v "2") "2" "1")))
               ((= k "BrushPure") (setq *PdfLayout_BrushPure* (= v "1")))
+              ((= k "UpdateDir") (setq *PdfLayout_UpdateDir* v))
+              ((= k "UpdateDlDir") (setq *PdfLayout_DownloadDir* v))
+              ((= k "UpdatePopup") (setq *PdfLayout_UpdatePopup* (= v "1")))
             )
           )
         )
@@ -3157,6 +3160,12 @@
         (princ "\n" f)
         (setq i (1+ i))
       )
+      (princ (strcat "UpdateDir=" (if (and (boundp '*PdfLayout_UpdateDir*) *PdfLayout_UpdateDir*) *PdfLayout_UpdateDir* "")) f)
+      (princ "\n" f)
+      (princ (strcat "UpdateDlDir=" (if (and (boundp '*PdfLayout_DownloadDir*) *PdfLayout_DownloadDir*) *PdfLayout_DownloadDir* "")) f)
+      (princ "\n" f)
+      (princ (strcat "UpdatePopup=" (if (and (boundp '*PdfLayout_UpdatePopup*) *PdfLayout_UpdatePopup* "1" "0"))) f)
+      (princ "\n" f)
       (close f)
     )
   )
@@ -4177,7 +4186,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.26 已加载")
+  (princ "\n  MAP工具箱 v2.27 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -6396,7 +6405,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.26")
+(setq *PdfLayout_Version* "2.27")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
@@ -7103,6 +7112,7 @@
 
 ;;; 当前插件安装目录（PdfLayout.lsp 所在目录，以反斜杠结尾）；取不到返回 nil
 ;;; 手动指定的安装目录（UPDDIR 设置；留空则自动探测）
+;;; 手动指定的安装目录（UPDDIR 设置；留空则自动探测）
 (setq *PdfLayout_UpdateDir* nil)
 
 ;;; 该目录里有没有 PdfLayout.lsp
@@ -7149,6 +7159,8 @@
         (progn
           (setq *PdfLayout_UpdateDir* d)
           (princ (strcat "\nPDFUPDATE: 安装目录已设为 " d))
+          (PdfLayout_UpdIniSet "UpdateDir" d)
+          (princ "\n（已记入 PdfLayout.ini，下次开 CAD 仍然有效）")
           d)
         (progn
           (princ (strcat "\nPDFUPDATE: 该目录里没有 PdfLayout.lsp: " d))
@@ -7164,7 +7176,9 @@
     (progn
       (setq d (strcat (vl-string-right-trim "\\" d) "\\"))
       (if (PdfLayout_DirHasLsp d)
-        (progn (setq *PdfLayout_UpdateDir* d) (princ (strcat "\nPDFUPDATE: 已设为 " d)))
+        (progn (setq *PdfLayout_UpdateDir* d)
+               (PdfLayout_UpdIniSet "UpdateDir" d)
+               (princ (strcat "\nPDFUPDATE: 已设为 " d "（已记住）")))
         (princ (strcat "\nPDFUPDATE: 该目录里没有 PdfLayout.lsp: " d)))))
   (princ))
 
@@ -7317,9 +7331,6 @@
 ;;;-------------------------------------------------------------
 ;;; 更新提示弹窗（Windows 消息框，不依赖 DCL 文件）
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_UpdatePopup* T)     ; 发现新版本时是否弹窗询问
-(setq *PdfLayout_PopupDone* nil)     ; 本会话是否已经弹过
-
 ;;; 弹窗：buttons 4=是/否、3=是/否/取消，图标 32=问号 48=警告 64=信息
 ;;; 返回 6=是 7=否 2=取消 -1=超时未选择；弹不出来返回 nil
 (defun PdfLayout_Popup (title text secs buttons / wsh rc)
@@ -7338,16 +7349,19 @@
     rc))
 
 ;;; 静默执行更新（不提问）：下载 → 校验 → 备份 → 覆盖 → 重载；成功返回 T
-(defun PdfLayout_UpdateRun (ver url md5)
+(defun PdfLayout_UpdateRun (ver url md5 / d)
   (if (PdfLayout_ApplyUpdate ver url md5)
     (progn
+      (setq d (PdfLayout_InstallDir))
       (setq *PdfLayout_Version* ver)
-      (vl-catch-all-apply 'load (list (strcat (PdfLayout_InstallDir) "PdfLayout.lsp")))
+      (vl-catch-all-apply 'load (list (strcat d "PdfLayout.lsp")))
       (setq *PdfLayout_RemoteVer* nil)
+      ;; 记住这次用的安装目录，下次不用再输
+      (if (and d (/= d "")) (PdfLayout_UpdIniSet "UpdateDir" d))
       T)
     nil))
 
-;;; PDFUPDATEPOP：开关"发现新版本时弹窗询问"
+;;; PDFUPDATEPOP：开关"发现新版本时弹窗询问"（会记进 ini）
 (defun c:pdfupdatepop (/ ans)
   (initget "Y N")
   (setq ans (getkword (strcat "\n发现新版本时是否弹窗询问？当前: "
@@ -7355,7 +7369,95 @@
                              " [开(Y)/关(N)] <不变>: ")))
   (if (= ans "Y") (setq *PdfLayout_UpdatePopup* T))
   (if (= ans "N") (setq *PdfLayout_UpdatePopup* nil))
-  (princ (strcat "\nPDFUPDATE: 弹窗提示已" (if *PdfLayout_UpdatePopup* "开启" "关闭") "。"))
+  (PdfLayout_UpdIniSet "UpdatePopup" (if *PdfLayout_UpdatePopup* "1" "0"))
+  (princ (strcat "\nPDFUPDATE: 弹窗提示已" (if *PdfLayout_UpdatePopup* "开启" "关闭")
+                 "（已记入 PdfLayout.ini）"))
+  (princ))
+;;;-------------------------------------------------------------
+;;; 更新相关的偏好开关
+;;;-------------------------------------------------------------
+(setq *PdfLayout_UpdatePopup* T)     ; 发现新版本时是否弹窗询问
+(setq *PdfLayout_PopupDone* nil)     ; 本会话是否已经弹过
+
+;;; 配置文件（PdfLayout.ini）路径
+(defun PdfLayout_UpdIniPath (/ d)
+  (setq d (vl-catch-all-apply 'PdfLayout_SettingsPathLsp nil))
+  (if (or (vl-catch-all-error-p d) (null d) (= d ""))
+    (setq d (strcat (getvar "TEMPPREFIX") "PdfLayout.ini")))
+  d)
+
+;;; 读一个键的值
+(defun PdfLayout_UpdIniGet (key / f line pos k out)
+  (setq out nil)
+  (setq f (vl-catch-all-apply 'open (list (PdfLayout_UpdIniPath) "r")))
+  (if (vl-catch-all-error-p f) (setq f nil))
+  (if f
+    (progn
+      (while (and (null out) (setq line (read-line f)))
+        (setq pos (vl-string-search "=" line))
+        (if (and pos (> pos 0))
+          (progn
+            (setq k (vl-string-trim " " (substr line 1 pos)))
+            (if (= (strcase k) (strcase key))
+              (setq out (vl-string-trim " \t\r\n" (substr line (+ pos 2))))))))
+      (close f)))
+  out)
+
+;;; 写入/更新一个键（其它内容原样保留）
+(defun PdfLayout_UpdIniSet (key val / p f line pos done lines)
+  (setq p (PdfLayout_UpdIniPath))
+  (setq lines nil done nil)
+  (if (PdfLayout_FileOK p)
+    (progn
+      (setq f (vl-catch-all-apply 'open (list p "r")))
+      (if (vl-catch-all-error-p f) (setq f nil))
+      (if f
+        (progn
+          (while (setq line (read-line f))
+            (setq pos (vl-string-search "=" line))
+            (if (and pos (> pos 0)
+                     (= (strcase (vl-string-trim " " (substr line 1 pos))) (strcase key)))
+              (progn
+                (setq lines (append lines (list (strcat key "=" val))))
+                (setq done T))
+              (setq lines (append lines (list line)))))
+          (close f)))))
+  (if (not done) (setq lines (append lines (list (strcat key "=" val)))))
+  (setq f (vl-catch-all-apply 'open (list p "w")))
+  (if (vl-catch-all-error-p f) (setq f nil))
+  (if f
+    (progn
+      (foreach line lines (princ (strcat line "\n") f))
+      (close f)
+      T)
+    nil))
+
+;;; 加载时读回上次记住的设置
+(defun PdfLayout_UpdateLoadPrefs (/ v)
+  (setq v (PdfLayout_UpdIniGet "UpdateDir"))
+  (if (and v (/= v "")) (setq *PdfLayout_UpdateDir* v))
+  (setq v (PdfLayout_UpdIniGet "UpdateDlDir"))
+  (if (and v (/= v "")) (setq *PdfLayout_DownloadDir* v))
+  (setq v (PdfLayout_UpdIniGet "UpdatePopup"))
+  (if (and v (/= v "")) (setq *PdfLayout_UpdatePopup* (= v "1")))
+  T)
+
+;;; UPDDLDIR：设置更新包下载目录（默认 Downloads）
+(defun c:upddldir (/ d)
+  (princ (strcat "\n当前更新包下载目录: " (PdfLayout_DownloadDirGet)))
+  (setq d (getstring T "\n输入新目录（回车不改；输入 - 恢复默认 Downloads）: "))
+  (cond
+    ((= d "-")
+     (setq *PdfLayout_DownloadDir* "")
+     (PdfLayout_UpdIniSet "UpdateDlDir" "")
+     (princ "\nPDFUPDATE: 已恢复默认（%USERPROFILE%\\Downloads）"))
+    ((and d (/= d ""))
+     (setq d (strcat (vl-string-right-trim "\\" d) "\\"))
+     (vl-catch-all-apply 'vl-mkdir (list (vl-string-right-trim "\\" d)))
+     (setq *PdfLayout_DownloadDir* d)
+     (PdfLayout_UpdIniSet "UpdateDlDir" d)
+     (princ (strcat "\nPDFUPDATE: 更新包下载目录已设为 " d))
+     (princ "\n（已记入 PdfLayout.ini，下次开 CAD 仍然有效）")))
   (princ))
 
 ;;; 加载完成后静默自动检查（一次会话只查一次）
@@ -7369,6 +7471,9 @@
 ;;;@CUIX-BEGIN
 (PdfLayout_LoadToolbar)
 ;;;@CUIX-END
+
+;;; 读回上次记住的更新设置（安装目录 / 下载目录 / 弹窗开关）
+(PdfLayout_UpdateLoadPrefs)
 
 ;;; 加载完成后自动检查更新
 (PdfLayout_UpdateAutoCheck)
