@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.25
+;;; MAP工具箱 PdfLayout.lsp  v2.26
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -137,10 +137,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.25 - 对话框定义"
+"// MAP工具箱 v2.26 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.25\";"
+"  label = \"MAP工具箱 v2.26\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -4177,7 +4177,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.25 已加载")
+  (princ "\n  MAP工具箱 v2.26 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -6396,7 +6396,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.25")
+(setq *PdfLayout_Version* "2.26")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
