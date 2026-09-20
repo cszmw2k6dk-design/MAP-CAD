@@ -1,1 +1,1 @@
-{"version":"2.26","release_url":"https://github.com/cszmw2k6dk-design/MAP-CAD/releases/download/v2.26/MAP-CAD_v2.26.zip","md5":"0edc4749118a96fe577aa287772465f3","releasenote":"版本号更新：用于验证 2.25 到 2.26 的自动更新（弹窗-下载-校验-备份-覆盖）","min_version":"2.10","mandatory":false,"released":"2026-09-14"}
+{"version":"2.28","release_url":"https://github.com/cszmw2k6dk-design/MAP-CAD/releases/download/v2.28/MAP-CAD_v2.28.zip","md5":"6b9c1b50905a903c8e11c5035d7ebe32","releasenote":"修复自动改名排序逻辑问题","mandatory":false,"released":"2026-09-20"}

@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.27
+;;; MAP工具箱 PdfLayout.lsp  v2.28
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -137,10 +137,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.27 - 对话框定义"
+"// MAP工具箱 v2.28 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.27\";"
+"  label = \"MAP工具箱 v2.28\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -1149,13 +1149,43 @@
   out
 )
 
-(defun PdfLayout_StableSort (lst cmp / out)
-  ;; 稳定插入排序：不依赖中望 vl-sort；插入排序本身稳定，并列保持原顺序、不丢元素
+(defun PdfLayout_MergeTwo (a b cmp / out)
+  ;; 合并两段已排好的表；两边相等时先取 a，保证稳定
   (setq out nil)
-  (foreach x lst
-    (setq out (PdfLayout_InsertSorted out x cmp))
+  (while (and a b)
+    (if (apply cmp (list (car b) (car a)))
+      (setq out (cons (car b) out) b (cdr b))
+      (setq out (cons (car a) out) a (cdr a))
+    )
   )
-  out
+  (while a (setq out (cons (car a) out)) (setq a (cdr a)))
+  (while b (setq out (cons (car b) out)) (setq b (cdr b)))
+  (reverse out)
+)
+
+(defun PdfLayout_MergeSortList (lst cmp / n h left right i)
+  ;; 稳定归并排序 O(n log n)。老写法是插入排序 O(n^2)：400 个格子预览一次要 1 秒多、
+  ;; 2000 个要 80 秒，对话框每点一下都重排一次，看起来就是"预览卡死/报错"
+  (setq n (length lst))
+  (if (< n 2)
+    lst
+    (progn
+      (setq h (/ n 2) left nil right lst i 0)
+      (while (< i h)
+        (setq left (cons (car right) left))
+        (setq right (cdr right))
+        (setq i (1+ i))
+      )
+      (PdfLayout_MergeTwo (PdfLayout_MergeSortList (reverse left) cmp)
+                          (PdfLayout_MergeSortList right cmp)
+                          cmp)
+    )
+  )
+)
+
+(defun PdfLayout_StableSort (lst cmp)
+  ;; 稳定排序：不用中望 vl-sort（会丢元素），改用自己的归并排序
+  (PdfLayout_MergeSortList lst cmp)
 )
 
 (defun PdfLayout_SortIndexed (lst cmp)
@@ -1328,8 +1358,83 @@
 (defun PdfLayout_SortByPositionTBR (lst) (PdfLayout_SortIndexed lst 'PdfLayout_CmpTBR))
 
 (defun PdfLayout_SortByPositionBTR (lst) (PdfLayout_SortIndexed lst 'PdfLayout_CmpBTR))
+;;;-------------------------------------------------------------
+;;; 分带（分行/分列）容差：按实际间距自适应
+;;;-------------------------------------------------------------
+;; 老写法 tol = max(0.25, 1%×范围) 有两个坑：
+;;   1) 固定下限 0.25 在小尺寸图纸里比行列间距还大（标签字高 0.05~0.25、
+;;      行列间距 0.2~0.5 很常见），一分带就把几行几列并成一带，
+;;      8 种排序只剩次方向起作用 —— 表现就是"好几种排序都变成一个顺序"；
+;;   2) 大范围密集网格里 1% 也可能大于行距，同样并带。
+;; 改成先从相邻坐标的间距估"行距/列距"：一排内的抖动远小于行距，
+;; 取"大于 2 倍基准间距"的那批间距的中位数当行距，容差取行距的一半；
+;; 估不出间距（整齐等距）再退回百分比规则，等距网格的间距本来就远大于该容差。
+(defun PdfLayout_CmpNumAsc (a b) (< (car a) (car b)))
+
+(defun PdfLayout_Median (lst / s n)
+  ;; 中位数（内部先排序，调用方不用保证有序）
+  (if (< (length lst) 1)
+    nil
+    (progn
+      (setq s (mapcar 'car
+                      (PdfLayout_SortIndexed
+                        (mapcar '(lambda (v) (cons v v)) lst)
+                        'PdfLayout_CmpNumAsc)))
+      (setq n (length s))
+      (if (= 1 (rem n 2))
+        (nth (/ n 2) s)
+        (/ (+ (nth (1- (/ n 2)) s) (nth (/ n 2) s)) 2.0)
+      )
+    )
+  )
+)
+
+(defun PdfLayout_BandTol (vals range / n s gaps base big pitch tol prev d first)
+  ;; vals = 主方向坐标表；range = 主方向跨度；返回分带容差（>= 1e-9）
+  (setq tol (* 0.001 (if (and *PdfLayout_RowTol* (> *PdfLayout_RowTol* 0)) *PdfLayout_RowTol* 10)
+                       range))
+  (setq n (length vals))
+  (if (> n 2)
+    (progn
+      (setq s (PdfLayout_SortIndexed
+                (mapcar '(lambda (v) (cons v v)) vals)
+                'PdfLayout_CmpNumAsc))
+      (setq gaps nil prev nil first T)
+      (foreach item s
+        (if first
+          (setq first nil)
+          (progn
+            (setq d (- (car item) prev))
+            (if (> d 1e-9) (setq gaps (cons d gaps)))
+          )
+        )
+        (setq prev (car item))
+      )
+      (if gaps
+        (progn
+          (setq base (PdfLayout_Median gaps))
+          (setq big nil)
+          (foreach d gaps
+            (if (> d (* 2.0 base)) (setq big (cons d big)))
+          )
+          (if big
+            (progn
+              (setq pitch (PdfLayout_Median big))
+              (if (and pitch (> pitch 0.0))
+                (setq tol (* 0.5 pitch))
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (if (or (not tol) (<= tol 0.0)) (setq tol 1e-9))
+  tol
+)
+
 (defun PdfLayout_SortPairsSmart (pairs order / cmpMain cmpSec axis xs ys xRange yRange tol
-                                 sorted groups g gKey out grp c k)
+                                 sorted groups g gKey gStarted out grp c k)
   ;; 用户手动摆放位置不一定整齐，按“容差”分行/分列后再排序
   (setq cmpMain (cond
     ((= order "1") 'PdfLayout_CmpLR)
@@ -1357,29 +1462,29 @@
       (setq ys (mapcar '(lambda (q) (cadr (PdfLayout_BBoxCenter (cdr q)))) pairs))
       (setq xRange (- (apply 'max xs) (apply 'min xs)))
       (setq yRange (- (apply 'max ys) (apply 'min ys)))
-      (setq tol (max 0.25 (* (if (and *PdfLayout_RowTol* (> *PdfLayout_RowTol* 0)) *PdfLayout_RowTol* 10)
-                            0.001 (if (= axis "X") xRange yRange))))
+      (setq tol (PdfLayout_BandTol (if (= axis "X") xs ys)
+                                   (if (= axis "X") xRange yRange)))
       ;; 先按主方向排序
       (setq sorted (PdfLayout_SortIndexed pairs cmpMain))
       ;; 按容差分成行/列组
-      (setq groups nil g nil gKey nil)
+      ;; 组内用 cons 往前堆，组表也倒着存；最后倒着拼接（append 只复制组内元素），整体 O(n)
+      (setq groups nil g nil gKey nil gStarted nil)
       (foreach p sorted
         (setq c (PdfLayout_BBoxCenter (cdr p)))
         (setq k (if (= axis "X") (car c) (cadr c)))
-        (if (and gKey (<= (abs (- gKey k)) tol))
-          (setq g (append g (list p)))
+        (if (and gStarted (<= (abs (- gKey k)) tol))
+          (setq g (cons p g))
           (progn
-            (if g (setq groups (append groups (list g))))
-            (setq g (list p) gKey k)
+            (if g (setq groups (cons (reverse g) groups)))
+            (setq g (list p) gKey k gStarted T)
           )
         )
       )
-      (if g (setq groups (append groups (list g))))
+      (if g (setq groups (cons (reverse g) groups)))
       ;; 组内按次方向排序，按组拼接
       (setq out nil)
       (foreach grp groups
-        (setq grp (PdfLayout_SortIndexed grp cmpSec))
-        (setq out (append out grp))
+        (setq out (append (PdfLayout_SortIndexed grp cmpSec) out))
       )
       out
     )
@@ -2595,7 +2700,7 @@
 )
 
 (defun PdfLayout_BuildSchemeGrid (pairs order sorted / idxMap i p ys ymax ymin
-                                  tol byY cur curY rows item rowX line out idx
+                                  tol byY cur curY curStarted rows item rowX line out idx
                                   rowY)
   (while (> (length pairs) 2000)
     (setq pairs (reverse (cdr (reverse pairs))))
@@ -2609,22 +2714,23 @@
   )
   (setq ys (mapcar '(lambda (q) (cadr (PdfLayout_BBoxCenter (cdr q)))) pairs))
   (setq ymax (apply 'max ys) ymin (apply 'min ys))
-  (setq tol (max 0.25 (* 0.001 (if (and *PdfLayout_RowTol* (> *PdfLayout_RowTol* 0)) *PdfLayout_RowTol* 10) (- ymax ymin))))
+  (setq tol (PdfLayout_BandTol ys (- ymax ymin)))
   (setq byY (PdfLayout_StableSort
               (mapcar '(lambda (q) (cons (cadr (PdfLayout_BBoxCenter (cdr q))) q)) pairs)
               'PdfLayout_CmpYGreater))
-  (setq rows nil cur nil curY nil)
+  (setq rows nil cur nil curY nil curStarted nil)
   (foreach item byY
-    (if (and curY (> (- curY (car item)) tol))
+    (if (and curStarted (> (- curY (car item)) tol))
       (progn
-        (setq rows (append rows (list cur)))
+        (setq rows (cons (reverse cur) rows))
         (setq cur nil)
       )
     )
-    (setq cur (append cur (list (cdr item))))
-    (setq curY (car item))
+    (setq cur (cons (cdr item) cur))
+    (setq curY (car item) curStarted T)
   )
-  (if cur (setq rows (append rows (list cur))))
+  (if cur (setq rows (cons (reverse cur) rows)))
+  (setq rows (reverse rows))
   ;; 行按最高点 Y 从大到小排序（上到下），保证显示顺序稳定
   (setq rows (PdfLayout_StableSort rows 'PdfLayout_CmpRowTop))
   ;; 示意图固定按物理位置从上到下显示，数字表示第几个被命名
@@ -2639,9 +2745,9 @@
         (setq line (strcat line "  " (if (< idx 10) (strcat " " (itoa idx)) (itoa idx))))
       )
     )
-    (setq out (append out (list line)))
+    (setq out (cons line out))
   )
-  out
+  (reverse out)
 )
 
 (defun PdfLayout_SetList (key items / s)
@@ -3164,7 +3270,7 @@
       (princ "\n" f)
       (princ (strcat "UpdateDlDir=" (if (and (boundp '*PdfLayout_DownloadDir*) *PdfLayout_DownloadDir*) *PdfLayout_DownloadDir* "")) f)
       (princ "\n" f)
-      (princ (strcat "UpdatePopup=" (if (and (boundp '*PdfLayout_UpdatePopup*) *PdfLayout_UpdatePopup* "1" "0"))) f)
+      (princ (strcat "UpdatePopup=" (if (and (boundp '*PdfLayout_UpdatePopup*) *PdfLayout_UpdatePopup*) "1" "0")) f)
       (princ "\n" f)
       (close f)
     )
@@ -4186,7 +4292,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.27 已加载")
+  (princ "\n  MAP工具箱 v2.28 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -4210,12 +4316,12 @@
     (while (< j cols)
       (setq pt (list (+ fx (* j colSp *PdfLayout_GridColDir*))
                      (+ fy (* i rowSp *PdfLayout_GridRowDir*)) 0.0))
-      (setq out (append out (list (cons nil (list pt pt)))))
+      (setq out (cons (cons nil (list pt pt)) out))
       (setq j (1+ j))
     )
     (setq i (1+ i))
   )
-  out
+  (reverse out)
 )
 
 (defun PdfLayout_GridUpdate (/ pairs order sorted pr i name names lines grid colSp rowSp h uw uh sx sy bgIdx txtIdx srcDesc initCol initRow rotDeg w)
@@ -4385,7 +4491,7 @@
       (setq grid (vl-catch-all-apply 'PdfLayout_BuildSchemeGrid (list pairs order sorted)))
       (setq grid (list "（未选择文字）"))
     )
-    (setq grid (vl-catch-all-apply 'PdfLayout_BuildSchemeGrid (list pairs order)))
+    (setq grid (vl-catch-all-apply 'PdfLayout_BuildSchemeGrid (list pairs order sorted)))
   )
   (if (vl-catch-all-error-p grid)
     (setq grid (list "（无法生成示意图）"))
@@ -4402,9 +4508,9 @@
   (if (= *PdfLayout_GridGeom* "S")
     ;; PDFRENAME：每个框选区域都从头编号（批内序号从 0 重新开始）
     (foreach pr (PdfLayout_RenamePlan order)
-      (setq lines (append lines (list (strcat "第" (itoa (1+ i)) "个: "
-                                             (PdfLayout_EllipsisMid
-                                               (PdfLayout_RenameNameAt names (cdr pr)) 14)))))
+      (setq lines (cons (strcat "第" (itoa (1+ i)) "个: "
+                                (PdfLayout_EllipsisMid
+                                  (PdfLayout_RenameNameAt names (cdr pr)) 14)) lines))
       (setq i (1+ i))
     )
     (foreach p sorted
@@ -4413,12 +4519,12 @@
                     (PdfLayout_NameAtPrefix *PdfLayout_GridPrefix*
                                             (+ *PdfLayout_GridStartN* i)
                                             *PdfLayout_GridDigits*)))
-      (setq lines (append lines (list (strcat "第" (itoa (1+ i)) "个: "
-                                             (PdfLayout_EllipsisMid name 14)))))
+      (setq lines (cons (strcat "第" (itoa (1+ i)) "个: "
+                                (PdfLayout_EllipsisMid name 14)) lines))
       (setq i (1+ i))
     )
   )
-  (PdfLayout_SetList "g_names" lines)
+  (PdfLayout_SetList "g_names" (reverse lines))
   (set_tile "g_info"
     (strcat "共 " (itoa (length pairs)) " 个多行文字"
             (if (and names (/= (length names) (length pairs)))
@@ -5232,12 +5338,12 @@
     (progn
       (setq s 0)
       (foreach p (PdfLayout_SortPairsSmart *PdfLayout_GridSelPairs* order)
-        (setq out (append out (list (cons p s))))
+        (setq out (cons (cons p s) out))
         (setq s (1+ s))
       )
     )
   )
-  out
+  (reverse out)
 )
 
 (defun PdfLayout_RenameBatchSorted (order)
@@ -6405,7 +6511,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.27")
+(setq *PdfLayout_Version* "2.28")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)

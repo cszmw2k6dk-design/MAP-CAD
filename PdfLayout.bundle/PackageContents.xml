@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ApplicationPackage SchemaVersion="1.0"
-                    AppVersion="2.22.0"
+                    AppVersion="2.28.0"
                     ProductCode="{2B4E2F63-8E67-4C5B-9A3D-7E1C0F5B2A11}"
                     UpgradeCode="{0E2A8B9C-4F1D-4A6E-9B7C-3D5E8F1A2B4C}"
                     Name="MAP工具箱"
@@ -9,7 +9,7 @@
   <CompanyDetails Name="CAD插件开发"/>
   <Components>
     <ComponentEntry AppName="PdfLayout"
-                    Version="2.22.0"
+                    Version="2.28.0"
                     ModuleName="./Contents/PdfLayout.lsp"
                     PerDocument="True"/>
   </Components>

@@ -1,8 +1,8 @@
 // PdfLayout.dcl
-// MAP工具箱 v2.22 - 对话框定义
+// MAP工具箱 v2.28 - 对话框定义
 
 PdfLayout : dialog {
-  label = "MAP工具箱 v2.22";
+  label = "MAP工具箱 v2.28";
   width = 62;
 
   : boxed_column {
