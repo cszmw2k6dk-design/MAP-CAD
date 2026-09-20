@@ -1,1 +1,1 @@
-{"version":"2.28","release_url":"https://github.com/cszmw2k6dk-design/MAP-CAD/releases/download/v2.28/MAP-CAD_v2.28.zip","md5":"6b9c1b50905a903c8e11c5035d7ebe32","releasenote":"修复自动改名排序逻辑问题","mandatory":false,"released":"2026-09-20"}
+{"version":"2.29","release_url":"https://github.com/cszmw2k6dk-design/MAP-CAD/releases/download/v2.29/MAP-CAD_v2.29.zip","md5":"231c65e4725ae40d64cd44f1926ae4fe","releasenote":"修复: LBD 标签表字母编号(1.C.1)读不出 + 标签列改取 Item Code；修复 PDFRENAME/PDFGRID 预览与实际顺序不一致","mandatory":false,"released":"2026-09-20"}

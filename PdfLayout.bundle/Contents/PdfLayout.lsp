@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.28
+;;; MAP工具箱 PdfLayout.lsp  v2.29
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -94,6 +94,10 @@
 (setq *PdfLayout_GridSheetFull* nil)
 (setq *PdfLayout_GridSheetSel* "")
 (setq *PdfLayout_GridPairs* nil)
+(setq *PdfLayout_GridPlan* nil)
+(setq *PdfLayout_GridPlanNames* nil)
+;; 对话框模式：由命令入口决定（grid=按范围铺网格 / rename=选择已有文字）
+(setq *PdfLayout_GridMode* "grid")
 (setq *PdfLayout_GridSelPairs* nil)
 ;; PDFRENAME 多批框选：按框选先后分批保存，编号时一批一批编，不跨批交叉
 (setq *PdfLayout_GridSelBatches* nil)
@@ -137,10 +141,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.28 - 对话框定义"
+"// MAP工具箱 v2.29 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.28\";"
+"  label = \"MAP工具箱 v2.29\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -1135,57 +1139,31 @@
 
 (defun PdfLayout_InsertSorted (lst x cmp / done out)
   ;; cmp 为命名比较函数（符号），中望不支持把 (quote (lambda ...)) 传给 apply
+  ;; 与老写法次序完全一致（插到第一个"应该排在 x 后面"的元素之前，没有就放末尾），
+  ;; 只是内部用 cons 往前堆再 reverse，避免每个元素都 append 复制整个表
   (setq done nil out nil)
   (foreach y lst
     (if (and (not done) (apply cmp (list x y)))
       (progn
-        (setq out (append out (list x)))
+        (setq out (cons x out))
         (setq done T)
       )
     )
-    (setq out (append out (list y)))
+    (setq out (cons y out))
   )
-  (if (not done) (setq out (append out (list x))))
-  out
-)
-
-(defun PdfLayout_MergeTwo (a b cmp / out)
-  ;; 合并两段已排好的表；两边相等时先取 a，保证稳定
-  (setq out nil)
-  (while (and a b)
-    (if (apply cmp (list (car b) (car a)))
-      (setq out (cons (car b) out) b (cdr b))
-      (setq out (cons (car a) out) a (cdr a))
-    )
-  )
-  (while a (setq out (cons (car a) out)) (setq a (cdr a)))
-  (while b (setq out (cons (car b) out)) (setq b (cdr b)))
+  (if (not done) (setq out (cons x out)))
   (reverse out)
 )
 
-(defun PdfLayout_MergeSortList (lst cmp / n h left right i)
-  ;; 稳定归并排序 O(n log n)。老写法是插入排序 O(n^2)：400 个格子预览一次要 1 秒多、
-  ;; 2000 个要 80 秒，对话框每点一下都重排一次，看起来就是"预览卡死/报错"
-  (setq n (length lst))
-  (if (< n 2)
-    lst
-    (progn
-      (setq h (/ n 2) left nil right lst i 0)
-      (while (< i h)
-        (setq left (cons (car right) left))
-        (setq right (cdr right))
-        (setq i (1+ i))
-      )
-      (PdfLayout_MergeTwo (PdfLayout_MergeSortList (reverse left) cmp)
-                          (PdfLayout_MergeSortList right cmp)
-                          cmp)
-    )
+(defun PdfLayout_StableSort (lst cmp / out)
+  ;; 稳定插入排序（v2.26 的写法）：不依赖中望 vl-sort（会丢元素），
+  ;; 插入排序本身稳定，并列保持原顺序、不丢元素 —— 标记/底图/视口的顺序都靠它，
+  ;; 保持与 v2.26 完全一致的排序结果
+  (setq out nil)
+  (foreach x lst
+    (setq out (PdfLayout_InsertSorted out x cmp))
   )
-)
-
-(defun PdfLayout_StableSort (lst cmp)
-  ;; 稳定排序：不用中望 vl-sort（会丢元素），改用自己的归并排序
-  (PdfLayout_MergeSortList lst cmp)
+  out
 )
 
 (defun PdfLayout_SortIndexed (lst cmp)
@@ -1358,81 +1336,6 @@
 (defun PdfLayout_SortByPositionTBR (lst) (PdfLayout_SortIndexed lst 'PdfLayout_CmpTBR))
 
 (defun PdfLayout_SortByPositionBTR (lst) (PdfLayout_SortIndexed lst 'PdfLayout_CmpBTR))
-;;;-------------------------------------------------------------
-;;; 分带（分行/分列）容差：按实际间距自适应
-;;;-------------------------------------------------------------
-;; 老写法 tol = max(0.25, 1%×范围) 有两个坑：
-;;   1) 固定下限 0.25 在小尺寸图纸里比行列间距还大（标签字高 0.05~0.25、
-;;      行列间距 0.2~0.5 很常见），一分带就把几行几列并成一带，
-;;      8 种排序只剩次方向起作用 —— 表现就是"好几种排序都变成一个顺序"；
-;;   2) 大范围密集网格里 1% 也可能大于行距，同样并带。
-;; 改成先从相邻坐标的间距估"行距/列距"：一排内的抖动远小于行距，
-;; 取"大于 2 倍基准间距"的那批间距的中位数当行距，容差取行距的一半；
-;; 估不出间距（整齐等距）再退回百分比规则，等距网格的间距本来就远大于该容差。
-(defun PdfLayout_CmpNumAsc (a b) (< (car a) (car b)))
-
-(defun PdfLayout_Median (lst / s n)
-  ;; 中位数（内部先排序，调用方不用保证有序）
-  (if (< (length lst) 1)
-    nil
-    (progn
-      (setq s (mapcar 'car
-                      (PdfLayout_SortIndexed
-                        (mapcar '(lambda (v) (cons v v)) lst)
-                        'PdfLayout_CmpNumAsc)))
-      (setq n (length s))
-      (if (= 1 (rem n 2))
-        (nth (/ n 2) s)
-        (/ (+ (nth (1- (/ n 2)) s) (nth (/ n 2) s)) 2.0)
-      )
-    )
-  )
-)
-
-(defun PdfLayout_BandTol (vals range / n s gaps base big pitch tol prev d first)
-  ;; vals = 主方向坐标表；range = 主方向跨度；返回分带容差（>= 1e-9）
-  (setq tol (* 0.001 (if (and *PdfLayout_RowTol* (> *PdfLayout_RowTol* 0)) *PdfLayout_RowTol* 10)
-                       range))
-  (setq n (length vals))
-  (if (> n 2)
-    (progn
-      (setq s (PdfLayout_SortIndexed
-                (mapcar '(lambda (v) (cons v v)) vals)
-                'PdfLayout_CmpNumAsc))
-      (setq gaps nil prev nil first T)
-      (foreach item s
-        (if first
-          (setq first nil)
-          (progn
-            (setq d (- (car item) prev))
-            (if (> d 1e-9) (setq gaps (cons d gaps)))
-          )
-        )
-        (setq prev (car item))
-      )
-      (if gaps
-        (progn
-          (setq base (PdfLayout_Median gaps))
-          (setq big nil)
-          (foreach d gaps
-            (if (> d (* 2.0 base)) (setq big (cons d big)))
-          )
-          (if big
-            (progn
-              (setq pitch (PdfLayout_Median big))
-              (if (and pitch (> pitch 0.0))
-                (setq tol (* 0.5 pitch))
-              )
-            )
-          )
-        )
-      )
-    )
-  )
-  (if (or (not tol) (<= tol 0.0)) (setq tol 1e-9))
-  tol
-)
-
 (defun PdfLayout_SortPairsSmart (pairs order / cmpMain cmpSec axis xs ys xRange yRange tol
                                  sorted groups g gKey gStarted out grp c k)
   ;; 用户手动摆放位置不一定整齐，按“容差”分行/分列后再排序
@@ -1462,8 +1365,10 @@
       (setq ys (mapcar '(lambda (q) (cadr (PdfLayout_BBoxCenter (cdr q)))) pairs))
       (setq xRange (- (apply 'max xs) (apply 'min xs)))
       (setq yRange (- (apply 'max ys) (apply 'min ys)))
-      (setq tol (PdfLayout_BandTol (if (= axis "X") xs ys)
-                                   (if (= axis "X") xRange yRange)))
+      ;; 容差 = v2.26 的固定公式 max(0.25, 1%×范围)：v2.28 改成的自适应容差会让分带结果
+      ;; 与 v2.26 不一致（行/列被拆开或并带，排序整体错位），已按 v2.26 回退
+      (setq tol (max 0.25 (* (if (and *PdfLayout_RowTol* (> *PdfLayout_RowTol* 0)) *PdfLayout_RowTol* 10)
+                            0.001 (if (= axis "X") xRange yRange))))
       ;; 先按主方向排序
       (setq sorted (PdfLayout_SortIndexed pairs cmpMain))
       ;; 按容差分成行/列组
@@ -2714,7 +2619,8 @@
   )
   (setq ys (mapcar '(lambda (q) (cadr (PdfLayout_BBoxCenter (cdr q)))) pairs))
   (setq ymax (apply 'max ys) ymin (apply 'min ys))
-  (setq tol (PdfLayout_BandTol ys (- ymax ymin)))
+  ;; 与 SortPairsSmart 同步：容差用 v2.26 的固定公式，保证预览分带与实际排序一致
+  (setq tol (max 0.25 (* 0.001 (if (and *PdfLayout_RowTol* (> *PdfLayout_RowTol* 0)) *PdfLayout_RowTol* 10) (- ymax ymin))))
   (setq byY (PdfLayout_StableSort
               (mapcar '(lambda (q) (cons (cadr (PdfLayout_BBoxCenter (cdr q))) q)) pairs)
               'PdfLayout_CmpYGreater))
@@ -3451,91 +3357,138 @@
   (if (assoc 90 ed) (setq ed (subst (cons 90 1.0) (assoc 90 ed) ed)) (setq ed (append ed (list (cons 90 1.0)))))
   (entmod ed)
 )
-(defun PdfLayout_LbdNumFromText (s / pos i c seg nums stripped ok)
-  ;; 从文字里提取 LBD 层级编号：
+(defun PdfLayout_LbdDigitsOnly (s / i n ok c)
+  ;; 整段是否纯数字（空串算否）
+  (setq i 1 n (strlen s) ok (> n 0))
+  (while (and ok (<= i n))
+    (setq c (substr s i 1))
+    (if (/= (PdfLayout_CharKind c) "D") (setq ok nil))
+    (setq i (1+ i))
+  )
+  ok
+)
+(defun PdfLayout_LbdSegVal (seg)
+  ;; 编号段 -> 键值：纯数字用整数（自动去掉前导 0），字母段统一大写
+  (if (PdfLayout_LbdDigitsOnly seg) (atoi seg) (strcase seg))
+)
+(defun PdfLayout_LbdSegToStr (n)
+  ;; 键值 -> 文字：整数用 itoa，字母段原样
+  (cond
+    ((eq (type n) 'INT) (itoa n))
+    ((eq (type n) 'STR) n)
+    ((numberp n) (rtos n 2 0))
+    (t "")
+  )
+)
+(defun PdfLayout_LbdParseRun (s start / i n seg nums c k dig stop)
+  ;; 从 start 位起按「段(.段)*」解析编号：段=连续数字/字母(<=8 位)、最多 8 段、
+  ;; 至少出现一个数字段。返回 (编号表 结束下标)；解析不出返回 (nil start)
+  (setq i start n (strlen s) seg "" nums nil k 0 dig nil stop nil)
+  (while (and (not stop) (<= i n))
+    (setq c (substr s i 1))
+    (if (or (= (PdfLayout_CharKind c) "D") (= (PdfLayout_CharKind c) "L"))
+      (if (> (strlen seg) 7)
+        (setq stop T)
+        (progn
+          (if (= (PdfLayout_CharKind c) "D") (setq dig T))
+          (setq seg (strcat seg c))
+          (setq i (1+ i))
+        )
+      )
+      (if (and (= c ".") (> (strlen seg) 0) (< i n) (< k 7))
+        (progn
+          (setq nums (append nums (list (PdfLayout_LbdSegVal seg))))
+          (setq k (1+ k) seg "")
+          (setq i (1+ i))
+        )
+        (setq stop T)
+      )
+    )
+  )
+  (if (> (strlen seg) 0)
+    (progn
+      (setq nums (append nums (list (PdfLayout_LbdSegVal seg))))
+      (setq k (1+ k))
+    )
+  )
+  (if (and dig nums (> k 0) (<= k 8))
+    (list nums i)
+    (list nil start)
+  )
+)
+(defun PdfLayout_LbdNumFromText (s / pos i r)
+  ;; 从文字里提取 LBD 层级编号，层级段可以是数字也可以是字母：
   ;;   "INV01A01-LBD-14.1.2" -> (14 1 2)、"LBD-14" -> (14)、"14" -> (14)
-  ;;   "14.1.2" -> (14 1 2)、"1.0" -> (1)；找不到或纯数字格式不合法返回 nil
+  ;;   "1.C.1" -> (1 "C" 1)、"1.01.1.C.1.POS" -> (1 1 1 "C" 1 "POS")
+  ;; 带空格/连字符等杂项、或整串不是「段(.段)*」时返回 nil
   (if (null s) (setq s ""))
   (setq s (vl-string-trim " " s))
   (setq pos (vl-string-search "LBD" (strcase s)))
   (if pos
     (progn
-      ;; ---- 带 LBD 前缀：从 LBD 后取数字段(可带 "." 分隔) ----
-      (setq i (+ pos 3) seg "" nums nil)
-      (while (and (<= i (strlen s)) (/= (PdfLayout_CharKind (substr s i 1)) "D"))
+      ;; ---- 带 LBD 前缀：从 LBD 之后第一个字母/数字起算，读到不合法字符为止 ----
+      (setq i (+ pos 3))
+      (while (and (<= i (strlen s)) (= (PdfLayout_CharKind (substr s i 1)) "O"))
         (setq i (1+ i))
       )
-      (while (and (<= i (strlen s)))
-        (setq c (substr s i 1))
-        (if (= (PdfLayout_CharKind c) "D")
-          (progn
-            (setq seg (strcat seg c))
+      (setq r (PdfLayout_LbdParseRun s i))
+      (if (not (car r))
+        (progn
+          ;; 例如 "LBD TAG-15"：再退到第一个数字重试
+          (setq i (+ pos 3))
+          (while (and (<= i (strlen s)) (/= (PdfLayout_CharKind (substr s i 1)) "D"))
             (setq i (1+ i))
           )
-          (if (and (= c ".") (/= seg "") (< i (strlen s))
-                   (= (PdfLayout_CharKind (substr s (1+ i) 1)) "D"))
-            (progn
-              (setq nums (append nums (list (atoi seg))))
-              (setq seg "")
-              (setq i (1+ i))
-            )
-            (setq i (+ (strlen s) 1))
-          )
+          (setq r (PdfLayout_LbdParseRun s i))
         )
       )
-      (if (/= seg "") (setq nums (append nums (list (atoi seg)))))
-      (if nums nums nil)
+      (car r)
     )
     (progn
-      ;; ---- 无 LBD 前缀：整串须为纯数字/点(如 "123"、"14.1.2")，并去除 Excel 数字常带的尾部 ".0" ----
-      (setq stripped s)
-      (while (and (> (strlen stripped) 2)
-                  (= (substr stripped (- (strlen stripped) 1) 2) ".0"))
-        (setq stripped (substr stripped 1 (- (strlen stripped) 2)))
+      ;; ---- 无 LBD 前缀：整串必须是「段(.段)*」，Excel 数字常带尾部 ".0" 先去掉 ----
+      (while (and (> (strlen s) 2) (= (substr s (- (strlen s) 1) 2) ".0"))
+        (setq s (substr s 1 (- (strlen s) 2)))
       )
-      (setq nums nil seg "" i 1 ok T)
-      (while (and ok (<= i (strlen stripped)))
-        (setq c (substr stripped i 1))
-        (cond
-          ((= (PdfLayout_CharKind c) "D")
-            (setq seg (strcat seg c))
-          )
-          ((and (= c ".") (/= seg "") (< i (strlen stripped))
-                (= (PdfLayout_CharKind (substr stripped (1+ i) 1)) "D"))
-            (setq nums (append nums (list (atoi seg))))
-            (setq seg "")
-          )
-          (t (setq ok nil))
-        )
-        (setq i (1+ i))
-      )
-      (if ok
-        (progn
-          (if (/= seg "") (setq nums (append nums (list (atoi seg)))))
-          (if nums nums nil)
-        )
+      (setq r (PdfLayout_LbdParseRun s 1))
+      (if (and (car r) (= (cadr r) (1+ (strlen s))))
+        (car r)
         nil
       )
     )
   )
 )
 (defun PdfLayout_LbdNumToStr (k / out)
-  ;; (14 1 2) -> "14.1.2"；(14) -> "14"
+  ;; (14 1 2) -> "14.1.2"；(1 "C" 1) -> "1.C.1"
   (setq out "")
   (foreach n k
-    (setq out (if (= out "") (itoa n) (strcat out "." (itoa n))))
+    (setq out (if (= out "") (PdfLayout_LbdSegToStr n)
+                (strcat out "." (PdfLayout_LbdSegToStr n))))
   )
   out
 )
-(defun PdfLayout_CmpLbdNumAsc (a b / la lb n i)
-  ;; 层级数字比较：逐段比大小，段相同且前段一致则短者小，如 (14) < (14 1)
-  (setq la (car a) lb (car b) n (min (length la) (length lb)) i 0)
-  (while (and (< i n) (= (nth i la) (nth i lb)))
+(defun PdfLayout_LbdSegCmp (a b / na nb sa sb)
+  ;; 段比较：数字段排在字母段前，同类按值比。返回 -1/0/1
+  (setq na (eq (type a) 'STR) nb (eq (type b) 'STR))
+  (cond
+    ((and na (not nb)) 1)
+    ((and nb (not na)) -1)
+    (na
+      (setq sa (strcase a) sb (strcase b))
+      (cond ((< sa sb) -1) ((= sa sb) 0) (t 1))
+    )
+    (t (cond ((< a b) -1) ((= a b) 0) (t 1)))
+  )
+)
+(defun PdfLayout_CmpLbdNumAsc (a b / la lb n i r)
+  ;; 层级编号比较：逐段比大小，段相同且前段一致则短者小，如 (14) < (14 1)
+  (setq la (car a) lb (car b) n (min (length la) (length lb)) i 0 r 0)
+  (while (and (< i n) (= r 0))
+    (setq r (PdfLayout_LbdSegCmp (nth i la) (nth i lb)))
     (setq i (1+ i))
   )
-  (if (< i n)
-    (< (nth i la) (nth i lb))
+  (if (= r 0)
     (< (length la) (length lb))
+    (< r 0)
   )
 )
 
@@ -3603,8 +3556,19 @@
   (if h h (PdfLayout_ScanHdr row '("编号" "编码" "編號" "編碼")))
 )
 (defun PdfLayout_LbdFindLabelCol (row idxL / h i)
-  ;; 表头识别标签列：关键词优先；找不到则取 LBD 列之后第一个非空列(idxL 未知时不猜)
-  (setq h (PdfLayout_ScanHdr row '("标签" "標籤" "名称" "名稱" "标注" "標註" "内容" "內容" "item" "code" "text" "描述")))
+  ;; 表头识别标签列。优先级（按需求：标签只写 Item Code）：
+  ;;   1) item                    -> 例如 "Item Code"
+  ;;   2) code / 编码 / 編碼      -> 代码类列
+  ;;   3) 标签/名称/内容/描述/Label/Name/Description/text
+  ;;   4) LBD 列之后第一个非空列（idxL 未知时不猜）
+  (setq h (PdfLayout_ScanHdr row '("item")))
+  (if (not h)
+    (setq h (PdfLayout_ScanHdr row '("code" "编码" "編碼")))
+  )
+  (if (not h)
+    (setq h (PdfLayout_ScanHdr row '("标签" "標籤" "名称" "名稱" "标注" "標註" "内容" "內容"
+                                     "描述" "label" "name" "description" "desc" "text")))
+  )
   (if h
     h
     (if (and idxL (>= idxL 0))
@@ -4292,7 +4256,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.28 已加载")
+  (princ "\n  MAP工具箱 v2.29 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -4324,13 +4288,12 @@
   (reverse out)
 )
 
-(defun PdfLayout_GridUpdate (/ pairs order sorted pr i name names lines grid colSp rowSp h uw uh sx sy bgIdx txtIdx srcDesc initCol initRow rotDeg w)
+(defun PdfLayout_GridUpdate (/ pairs order sorted pr i name names lines grid colSp rowSp h uw uh sx sy bgIdx txtIdx srcDesc initCol initRow rotDeg w planNames)
   (setq *PdfLayout_GridRows* (max 1 (min 100 (PdfLayout_GetTileInt "g_rows" 4))))
   (setq *PdfLayout_GridCols* (max 1 (min 100 (PdfLayout_GetTileInt "g_cols" 5))))
-  ;; PDFGRID 只保留「框选范围自动算」；固定绝对参数已移除（PDFRENAME 仍走 "S"）
-  (if (/= *PdfLayout_GridGeom* "S")
-    (setq *PdfLayout_GridGeom* "1")
-  )
+  ;; 模式由命令决定：PDFGRID=按范围自动(网格) / PDFRENAME=选择已有文字。
+  ;; ini 或方案预设里残留的 Geom 一律不采信，避免预览盘面与实际执行不是同一种
+  (setq *PdfLayout_GridGeom* (if (equal *PdfLayout_GridMode* "rename") "S" "1"))
   (setq *PdfLayout_GridHMode* (if (= (PdfLayout_GetTileStr "g_hmanual") "1") "manual" "auto"))
   (setq *PdfLayout_GridHRatio* (max 0.01 (min 2.0 (PdfLayout_GetTileReal "g_hratio" 0.4))))
   (setq *PdfLayout_GridMMode* (if (= (PdfLayout_GetTileStr "g_mmode") "1") "custom" "auto"))
@@ -4519,11 +4482,15 @@
                     (PdfLayout_NameAtPrefix *PdfLayout_GridPrefix*
                                             (+ *PdfLayout_GridStartN* i)
                                             *PdfLayout_GridDigits*)))
+      (setq planNames (append planNames (list name)))
       (setq lines (cons (strcat "第" (itoa (1+ i)) "个: "
                                 (PdfLayout_EllipsisMid name 14)) lines))
       (setq i (1+ i))
     )
   )
+  ;; 把预览用到的顺序与名称存下来，实际生成时直接复用，保证「预览 = 结果」
+  (setq *PdfLayout_GridPlan* (if (= *PdfLayout_GridGeom* "S") nil sorted)
+        *PdfLayout_GridPlanNames* (if (= *PdfLayout_GridGeom* "S") nil planNames))
   (PdfLayout_SetList "g_names" (reverse lines))
   (set_tile "g_info"
     (strcat "共 " (itoa (length pairs)) " 个多行文字"
@@ -4757,7 +4724,8 @@
           (setq *PdfLayout_GridColSp* (PdfLayout_OrDefault (PdfLayout_ProfileGet (cdr pf) "ColSp") 20.0))
           (setq *PdfLayout_GridH* (PdfLayout_OrDefault (PdfLayout_ProfileGet (cdr pf) "H") 0.5))
           (setq *PdfLayout_GridHRatio* (PdfLayout_OrDefault (PdfLayout_ProfileGet (cdr pf) "HRatio") 0.4))
-          (setq *PdfLayout_GridGeom* (PdfLayout_OrDefault (PdfLayout_ProfileGet (cdr pf) "Geom") "1"))
+          ;; 几何方式（网格 / 选择已有文字）由命令决定，方案里只保存不改模式
+          (setq *PdfLayout_GridGeom* (if (equal *PdfLayout_GridMode* "rename") "S" "1"))
           (setq *PdfLayout_GridHMode* (PdfLayout_OrDefault (PdfLayout_ProfileGet (cdr pf) "HMode") "auto"))
           (setq *PdfLayout_GridMT* (PdfLayout_OrDefault (PdfLayout_ProfileGet (cdr pf) "MT") 0.0))
           (setq *PdfLayout_GridMB* (PdfLayout_OrDefault (PdfLayout_ProfileGet (cdr pf) "MB") 0.0))
@@ -5211,12 +5179,12 @@
   )
 )
 
-(defun c:pdfgrid (/ p1 p2 res doc blk pairs sorted i done name txtH rad m ins lay pt bb pmin pmax tw sel en)
+(defun c:pdfgrid (/ p1 p2 res doc blk pairs sorted planNames i done name txtH rad m ins lay pt bb pmin pmax tw sel en)
   (vl-load-com)
   (PdfLayout_OrderPreviewClear)
   (PdfLayout_LoadSettings)
   ;; PDFGRID 只用「框选范围自动算」：固定绝对参数(F) 与 手动点取(M) 已移除
-  (setq *PdfLayout_GridGeom* "1")
+  (setq *PdfLayout_GridGeom* "1" *PdfLayout_GridMode* "grid")
   (setq p1 (getpoint "\n点取网格范围第一角: "))
   (if p1
     (progn
@@ -5237,7 +5205,14 @@
   (if (= res "1")
       (progn
         (setq pairs (PdfLayout_GridPairsFromGlobals))
-      (setq sorted (PdfLayout_SortPairsSmart pairs *PdfLayout_PreviewOrder*))
+      ;; 复用对话框里预览过的顺序与名称，保证「预览 = 结果」
+      (setq sorted (if (and *PdfLayout_GridPlan*
+                            (= (length *PdfLayout_GridPlan*) (length pairs)))
+                     *PdfLayout_GridPlan*
+                     (PdfLayout_SortPairsSmart pairs *PdfLayout_PreviewOrder*)))
+      (setq planNames (if (and *PdfLayout_GridPlanNames*
+                               (= (length *PdfLayout_GridPlanNames*) (length sorted)))
+                        *PdfLayout_GridPlanNames* nil))
       (setq doc (vla-get-ActiveDocument (vlax-get-Acad-Object)))
       (if (= (getvar "TILEMODE") 1)
         (setq blk (vla-get-ModelSpace doc))
@@ -5253,12 +5228,14 @@
       ;; 用 vla-AddMText 创建（背景填充 DXF 生效路径与 PDFLBD 一致），
       ;; 改"正中"附着点后中望不重排文字，读出插入点整体移到网格点，保证中心=网格点
       (foreach pair sorted
-        (setq name (if (and (equal *PdfLayout_GridSrc* "xlsx") *PdfLayout_GridNames*
-                            (< i (length *PdfLayout_GridNames*)))
-                      (nth i *PdfLayout_GridNames*)
-                      (PdfLayout_NameAtPrefix *PdfLayout_GridPrefix*
-                                              (+ *PdfLayout_GridStartN* i)
-                                              *PdfLayout_GridDigits*)))
+        (setq name (if planNames
+                      (nth i planNames)
+                      (if (and (equal *PdfLayout_GridSrc* "xlsx") *PdfLayout_GridNames*
+                               (< i (length *PdfLayout_GridNames*)))
+                        (nth i *PdfLayout_GridNames*)
+                        (PdfLayout_NameAtPrefix *PdfLayout_GridPrefix*
+                                                (+ *PdfLayout_GridStartN* i)
+                                                *PdfLayout_GridDigits*))))
         (setq pt (PdfLayout_BBoxCenter (cdr pair)))
         (setq m (vl-catch-all-apply 'vla-AddMText
                   (list blk (vlax-3d-point pt) 0.0 name)))
@@ -5326,12 +5303,13 @@
 (defun PdfLayout_RenamePlan (order / out b s)
   ;; 返回 ((pair . 批内序号) ...)：批次按框选先后；批内按 order 排序；
   ;; 关键：每一批的序号都从 0 重新开始，也就是“每个框选区域都从头编号”。
+  ;; 列表顺序 = 实际处理顺序（示意图/名称列表都按这个顺序显示，保证预览与结果一致）
   (setq out nil)
   (if *PdfLayout_GridSelBatches*
     (foreach b *PdfLayout_GridSelBatches*
       (setq s 0)
       (foreach p (PdfLayout_SortPairsSmart b order)
-        (setq out (append out (list (cons p s))))
+        (setq out (cons (cons p s) out))
         (setq s (1+ s))
       )
     )
@@ -5390,7 +5368,7 @@
   (vl-load-com)
   (PdfLayout_OrderPreviewClear)
   (PdfLayout_LoadSettings)
-  (setq *PdfLayout_GridGeom* "S")
+  (setq *PdfLayout_GridGeom* "S" *PdfLayout_GridMode* "rename")
   (setq *PdfLayout_GridSelPairs* nil)
   (setq *PdfLayout_GridSelBatches* nil)
   (princ "\n[PDFRENAME] 框选要处理的多行文字(MTEXT): ")
@@ -5403,7 +5381,7 @@
                      " 个多行文字；在对话框里可继续框选累加，最后点确定一次改名。"))
       (setq res (PdfLayout_GridShowDialog))
       ;; 对话框里点了「继续框选下一个区域」：再框一批累加，然后重新打开对话框
-      ;; （编号顺序仍按图面位置统一排，不按框选先后）
+      ;; （批次按框选先后处理，批内按排序方向排；每一批都从起始编号重新编号）
       (while (= res "3")
         (princ (strcat "\n继续框选下一个区域（已选 " (itoa (length *PdfLayout_GridSelPairs*))
                        " 个，直接回车=不再追加）: "))
@@ -6511,7 +6489,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.28")
+(setq *PdfLayout_Version* "2.29")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
