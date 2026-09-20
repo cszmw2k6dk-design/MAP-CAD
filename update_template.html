@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAP工具箱 · 更新</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);color:#eef2f5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:18px}
+.card{background:rgba(255,255,255,.09);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);border-radius:18px;padding:34px 36px;max-width:500px;width:100%;box-shadow:0 14px 44px rgba(0,0,0,.35)}
+.logo{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.logo .dot{width:12px;height:12px;border-radius:50%;background:#4dd0a1;box-shadow:0 0 12px #4dd0a1}
+.logo span{font-size:13px;letter-spacing:2px;color:#9fd6c2;text-transform:uppercase}
+h1{font-size:24px;margin:2px 0 4px;font-weight:700}
+.ver{display:inline-block;margin:14px 0 10px;padding:8px 18px;border-radius:999px;background:linear-gradient(90deg,#16a085,#2980b9);font-size:26px;font-weight:800;letter-spacing:1px}
+.note{color:#cdd8de;font-size:15px;line-height:1.7;min-height:24px;white-space:pre-wrap}
+ul{list-style:none;padding:0;margin:10px 0 0}
+ul li{padding:6px 0;border-bottom:1px dashed rgba(255,255,255,.12);font-size:14px;color:#dfe8ec}
+.btn{display:block;margin:24px 0 14px;text-align:center;padding:14px 20px;background:linear-gradient(90deg,#27ae60,#16a085);color:#fff;text-decoration:none;font-weight:700;border-radius:12px;font-size:16px;box-shadow:0 8px 20px rgba(39,174,96,.35)}
+.btn:hover{filter:brightness(1.08)}
+.meta{font-size:12px;color:#9fb3bd;margin-top:6px;word-break:break-all}
+.meta b{color:#cfe3ea;font-weight:600}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo"><span class="dot"></span><span>MAP CAD PLUGIN</span></div>
+  <h1>MAP工具箱</h1>
+  <div class="ver" id="ver">v@@VER@@</div>
+  <div class="note" id="note">@@NOTE@@</div>
+  <ul>
+    <li>◎ 打开 CAD 自动检查更新，发现新版即提示</li>
+    <li>◎ 也可手动输入 <b>PDFUPDATE</b> 检查</li>
+  </ul>
+  <a class="btn" id="dl" href="@@ZIP@@">下载更新包</a>
+  <div class="meta">版本信息：<span id="md5">@@MD5@@</span></div>
+  <div class="meta">生成时间：<span id="date">@@DATE@@</span></div>
+</div>
+<script>
+var D={ver:"@@VER@@",note:"@@NOTE@@",md5:"@@MD5@@",zip:"@@ZIP@@"};
+function render(){
+  document.getElementById("ver").textContent="v"+D.ver;
+  document.getElementById("note").textContent=D.note;
+  document.getElementById("md5").textContent=D.md5;
+  document.getElementById("dl").href=D.zip;
+}
+try{
+  fetch("version.json").then(function(r){return r.json();}).then(function(j){
+    if(j&&j.version){D.ver=j.version;D.note=j.releasenote||D.note;D.md5=j.md5||D.md5;D.zip=j.release_url||D.zip;render();}
+  }).catch(function(){render();});
+}catch(e){render();}
+render();
+</script>
+</body>
+</html>
