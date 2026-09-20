@@ -138,7 +138,7 @@ if ($gh) {
   if (-not $release) {
     $payload = @{ tag_name = $Tag; name = "MAP工具箱 v$Version"; body = $body; draft = $false; prerelease = $false } |
       ConvertTo-Json -Compress
-    $release = Invoke-RestMethod -Method Post -Uri $api -Headers $headers -Body $payload -ContentType "application/json"
+    $release = Invoke-RestMethod -Method Post -Uri $api -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($payload)) -ContentType "application/json; charset=utf-8"
     Write-Host ("release     : created id={0}" -f $release.id)
   } else {
     Write-Host ("release     : exists id={0}" -f $release.id)
