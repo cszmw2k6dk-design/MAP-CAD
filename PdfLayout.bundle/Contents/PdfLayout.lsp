@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.29
+;;; MAP工具箱 PdfLayout.lsp  v2.30
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -141,10 +141,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.29 - 对话框定义"
+"// MAP工具箱 v2.30 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.29\";"
+"  label = \"MAP工具箱 v2.30\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -2521,7 +2521,7 @@
   (setq xl nil)
 )
 
-(defun PdfLayout_GetXlsxSheetNames (path / xl wbs wb shs names i sh hadExcel)
+(defun PdfLayout_GetXlsxSheetNames (path / xl wbs wb shs names i sh mxNames hadExcel)
   ;; 读取 Excel 工作簿的所有分表名（按表顺序），用于“布局名来自Excel分表”
   (setq names nil)
   (setq hadExcel (vl-catch-all-apply 'vlax-get-object (list "Excel.Application")))
@@ -2544,7 +2544,14 @@
               (while (<= i (vlax-get-property shs 'Count))
                 (setq sh (vl-catch-all-apply 'vlax-get-property (list shs 'Item i)))
                 (if (not (vl-catch-all-error-p sh))
-                  (setq names (append names (list (vlax-get-property sh 'Name))))
+                  (progn
+                    ;; 新格式（矩阵表）用第一行的分布局名；老格式仍用分表名
+                    (setq mxNames (PdfLayout_SheetMatrixNames sh))
+                    (if mxNames
+                      (setq names (append names mxNames))
+                      (setq names (append names (list (vlax-get-property sh 'Name))))
+                    )
+                  )
                 )
                 (setq i (1+ i))
               )
@@ -3584,6 +3591,197 @@
   )
 )
 
+;;;-------------------------------------------------------------
+;;; 标签表识别：兼容两种表格格式
+;;;   老格式：一张分表 = 一个布局（表头里找 LBD 列 + 标签列，一行一个 LBD）
+;;;   新格式（矩阵表）：第一行（B 列起）= 分布局名，第一列 = LBD 号，
+;;;                     每列布局名下面那一格 = 该布局该 LBD 的标签
+;;; 判定要点：老格式的编号写在“LBD NO.”表头下面（1.C.1 这种），
+;;;           矩阵表的编号本身就带 LBD 前缀（LBD1 这种）且第一行就是布局名。
+;;;-------------------------------------------------------------
+(defun PdfLayout_SplitLabels (s / out i n c cur)
+  ;; 单元格里的多个标签拆开：& / 、 , ; + | 换行 都算分隔；返回字符串表
+  (setq s (if s s ""))
+  (setq out nil cur "" i 1 n (strlen s))
+  (while (<= i n)
+    (setq c (substr s i 1))
+    (if (member c (list "&" "/" "、" "," "，" ";" "；" "+" "|" "\n" "\r" "\t"))
+      (progn
+        (setq cur (vl-string-trim " \t" cur))
+        (if (/= cur "") (setq out (append out (list cur))))
+        (setq cur "")
+      )
+      (setq cur (strcat cur c))
+    )
+    (setq i (1+ i))
+  )
+  (setq cur (vl-string-trim " \t" cur))
+  (if (/= cur "") (setq out (append out (list cur))))
+  out
+)
+
+(defun PdfLayout_AssocLoose (name alist / hit nm)
+  ;; 按“去空格 + 忽略大小写”在表里找名字对应的项（找不到再退回原样 assoc）
+  (setq hit nil)
+  (if (and name alist)
+    (foreach kv alist
+      (if (and (not hit) (eq (type (car kv)) 'STR))
+        (progn
+          (setq nm (strcase (vl-string-trim " \t" (car kv))))
+          (if (= nm (strcase (vl-string-trim " \t" name)))
+            (setq hit kv)
+          )
+        )
+      )
+    )
+  )
+  (if hit hit (assoc name alist))
+)
+
+(defun PdfLayout_NamesBrief (alist / out i)
+  ;; 把表里的名字取前几个拼成一行，用于提示
+  (setq out "" i 0)
+  (foreach kv alist
+    (if (< i 5)
+      (progn
+        (setq out (if (= out "") (car kv) (strcat out "、" (car kv))))
+        (setq i (1+ i))
+      )
+    )
+  )
+  (if (> (length alist) 5) (setq out (strcat out " …")))
+  out
+)
+
+(defun PdfLayout_MatrixNames (rows / hdr out j nm)
+  ;; 矩阵表第一行的布局名（B 列起，按原顺序，跳过空格）
+  (setq out nil hdr (if rows (car rows) nil) j 1)
+  (while (and hdr (< j (length hdr)))
+    (setq nm (if (nth j hdr) (vl-string-trim " " (nth j hdr)) ""))
+    (if (/= nm "") (setq out (append out (list nm))))
+    (setq j (1+ j))
+  )
+  out
+)
+
+(defun PdfLayout_MatrixRowsP (rows / hdr i nHdr nPre nLbd nCol r c j has a1)
+  ;; 判定是不是“矩阵表”：第一行 B 列起 >=2 个非空表头；且第一列 >=2 行是「LBD 开头」的编号；
+  ;; 或者 A1 为空、第一列 >=2 行是 LBD 编号、且 B 列起有 >=3 列真的带数据（编号不带 LBD 前缀的写法）
+  (setq nHdr 0 nPre 0 nLbd 0 nCol 0)
+  (if (and rows (listp (car rows)))
+    (progn
+      (setq hdr (car rows) a1 (if (car hdr) (vl-string-trim " " (car hdr)) "") i 1)
+      (while (< i (length hdr))
+        (if (and (nth i hdr) (/= (nth i hdr) "")) (setq nHdr (1+ nHdr)))
+        (setq i (1+ i))
+      )
+      (foreach r (cdr rows)
+        (if (listp r)
+          (progn
+            (setq c (if (car r) (car r) ""))
+            (if (PdfLayout_LbdNumFromText c)
+              (progn
+                (setq nLbd (1+ nLbd))
+                (if (vl-string-search "LBD" (strcase c)) (setq nPre (1+ nPre)))
+              )
+            )
+          )
+        )
+      )
+      (setq j 1)
+      (while (< j (length hdr))
+        (setq has nil)
+        (foreach r (cdr rows)
+          (if (and (listp r) (< j (length r)) (nth j r) (/= (nth j r) "")) (setq has T))
+        )
+        (if has (setq nCol (1+ nCol)))
+        (setq j (1+ j))
+      )
+    )
+  )
+  (and (>= nHdr 2)
+       (or (>= nPre 2)
+           (and (= a1 "") (>= nLbd 2) (>= nCol 3)))
+  )
+)
+
+(defun PdfLayout_MatrixColumns (rows / hdr out j nm pairs r lbd lab k cur)
+  ;; 矩阵表 -> ((布局名 . ((LBD编号 . "标签A/标签B") ...)) ...)，结构与老格式完全一致
+  (setq out nil hdr (if rows (car rows) nil) j 1)
+  (while (and hdr (< j (length hdr)))
+    (setq nm (if (nth j hdr) (vl-string-trim " " (nth j hdr)) ""))
+    (if (/= nm "")
+      (progn
+        (setq pairs nil)
+        (foreach r (cdr rows)
+          (if (listp r)
+            (progn
+              (setq lbd (if (car r) (vl-string-trim " " (car r)) ""))
+              (setq lab (if (and (< j (length r)) (nth j r)) (nth j r) ""))
+              (if (and (/= lab "") (/= lbd ""))
+                (progn
+                  (setq k (PdfLayout_LbdNumFromText lbd))
+                  (if k
+                    (progn
+                      (setq cur (assoc k pairs))
+                      (if cur
+                        (setq pairs (subst (cons k (append (cdr cur) (PdfLayout_SplitLabels lab))) cur pairs))
+                        (setq pairs (append pairs (list (cons k (PdfLayout_SplitLabels lab)))))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+        (setq pairs (mapcar '(lambda (kv) (cons (car kv) (PdfLayout_JoinLabelsList (cdr kv)))) pairs))
+        (setq out (append out (list (cons nm pairs))))
+      )
+    )
+    (setq j (1+ j))
+  )
+  out
+)
+
+(defun PdfLayout_SheetRows (sh / ur vals arr rows)
+  ;; 读一张分表的“使用区域” -> 二维字符串表（空表返回 nil）
+  (setq rows nil)
+  (setq ur (vl-catch-all-apply 'vlax-get-property (list sh 'UsedRange)))
+  (if (and ur (not (vl-catch-all-error-p ur)))
+    (progn
+      (setq vals (vl-catch-all-apply 'vlax-get-property (list ur 'Value)))
+      (if (and vals (not (vl-catch-all-error-p vals)))
+        (progn
+          (setq arr (vl-catch-all-apply 'vlax-variant-value (list vals)))
+          (if (not (vl-catch-all-error-p arr))
+            (progn
+              (setq rows (vl-catch-all-apply 'vlax-safearray->list (list arr)))
+              (if (or (vl-catch-all-error-p rows) (null rows))
+                (setq rows nil)
+                (progn
+                  (if (not (listp (car rows))) (setq rows (list rows)))
+                  (setq rows (mapcar '(lambda (r) (mapcar 'PdfLayout_CellStr r)) rows))
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  rows
+)
+
+(defun PdfLayout_SheetMatrixNames (sh / rows)
+  ;; 这张分表如果是“矩阵表”，返回第一行的分布局名；否则 nil（按老格式用分表名）
+  (setq rows (PdfLayout_SheetRows sh))
+  (if (and rows (PdfLayout_MatrixRowsP rows))
+    (PdfLayout_MatrixNames rows)
+    nil
+  )
+)
+
 (defun PdfLayout_ReadAllLbdLabels (path / xl wbs wb shs out i sh sheet ur vals arr shCount rng hadExcel curLbd
                                    rows map lbd lab cur labels kv headRow idxL idxT dataRows)
   ;; 一次读取 Excel 所有分表：返回 ((分表名 . ((LBD编号 . "标签A/标签B") ...)) ...)
@@ -3625,49 +3823,57 @@
                             (setq rows (vlax-safearray->list arr))
                                                         (if (and rows (not (listp (car rows)))) (setq rows (list rows)))
 (setq rows (mapcar '(lambda (r) (mapcar 'PdfLayout_CellStr r)) rows))
-                            (setq headRow nil idxL nil idxT nil dataRows rows)
-                            (if (and rows (listp (car rows)))
+                            ;; 新格式（矩阵表）：第一行=分布局名，第一列=LBD号，每列一格=该布局该 LBD 的标签
+                            ;; → 展开成和「一布局一分表」一样的结构，后面的取值逻辑不用改
+                            (if (PdfLayout_MatrixRowsP rows)
+                              (setq out (append out (PdfLayout_MatrixColumns rows)))
                               (progn
-                                (setq headRow (car rows))
-                                (setq idxL (PdfLayout_LbdFindCol headRow))
-                                (if idxL (setq idxT (PdfLayout_LbdFindLabelCol headRow idxL)))
-                                (if (not idxT) (setq idxT (PdfLayout_LbdFindLabelCol headRow nil)))
-                                ;; 首行视为表头跳过；其后只有整行没有 LBD 编号的表头/标题行才继续跳过
-                                (setq dataRows (cdr rows))
-                                (while (and dataRows (not (PdfLayout_RowHasLbdNum (car dataRows))))
-                                  (setq dataRows (cdr dataRows))
+                              (setq headRow nil idxL nil idxT nil dataRows rows)
+                              (if (and rows (listp (car rows)))
+                                (progn
+                                  (setq headRow (car rows))
+                                  (setq idxL (PdfLayout_LbdFindCol headRow))
+                                  (if idxL (setq idxT (PdfLayout_LbdFindLabelCol headRow idxL)))
+                                  (if (not idxT) (setq idxT (PdfLayout_LbdFindLabelCol headRow nil)))
+                                  ;; 首行视为表头跳过；其后只有整行没有 LBD 编号的表头/标题行才继续跳过
+                                  (setq dataRows (cdr rows))
+                                  (while (and dataRows (not (PdfLayout_RowHasLbdNum (car dataRows))))
+                                    (setq dataRows (cdr dataRows))
+                                  )
                                 )
                               )
-                            )
-                            (if (not idxL) (setq idxL 0))
-                            (if (not idxT) (setq idxT 2))
-                            (foreach r dataRows
-                              ;; 标签取识别到的标签列；识别到 LBD 列为空的续行(负极)归入上一个 LBD
-                              (setq lbd (if (< idxL (length r)) (nth idxL r) "") lab (if (< idxT (length r)) (nth idxT r) ""))
-                              (if (and lab (/= lab ""))
-                                (progn
-                                  (if (and lbd (/= lbd "") (PdfLayout_LbdNumFromText lbd))
-                                    (setq n0 (PdfLayout_LbdNumFromText lbd) curLbd n0)
-                                    (setq n0 curLbd)
-                                  )
-                                  (if n0
-                                    (progn
-                                      (setq cur (assoc n0 map))
-                                      (if cur
-                                        (setq map (subst (cons n0 (append (cdr cur) (list lab))) cur map))
-                                        (setq map (append map (list (cons n0 (list lab)))))
+                              (if (not idxL) (setq idxL 0))
+                              (if (not idxT) (setq idxT 2))
+                              (foreach r dataRows
+                                ;; 标签取识别到的标签列；识别到 LBD 列为空的续行(负极)归入上一个 LBD
+                                (setq lbd (if (< idxL (length r)) (nth idxL r) "") lab (if (< idxT (length r)) (nth idxT r) ""))
+                                (if (and lab (/= lab ""))
+                                  (progn
+                                    (if (and lbd (/= lbd "") (PdfLayout_LbdNumFromText lbd))
+                                      (setq n0 (PdfLayout_LbdNumFromText lbd) curLbd n0)
+                                      (setq n0 curLbd)
+                                    )
+                                    (if n0
+                                      (progn
+                                        (setq cur (assoc n0 map))
+                                        (if cur
+                                          (setq map (subst (cons n0 (append (cdr cur) (list lab))) cur map))
+                                          (setq map (append map (list (cons n0 (list lab)))))
+                                        )
                                       )
                                     )
                                   )
                                 )
                               )
+                              (setq labels nil)
+                              (foreach kv map
+                                (setq labels (append labels (list (cons (car kv)
+                                                                         (PdfLayout_JoinLabelsList (cdr kv))))))
+                              )
+                              (setq out (append out (list (cons sheet labels))))
+                              )
                             )
-                            (setq labels nil)
-                            (foreach kv map
-                              (setq labels (append labels (list (cons (car kv)
-                                                                       (PdfLayout_JoinLabelsList (cdr kv))))))
-                            )
-                            (setq out (append out (list (cons sheet labels))))
+
                           )
                         )
                       )
@@ -3859,7 +4065,7 @@
   )
 )
 
-(defun PdfLayout_LbdManualLoadXlsx (path / sheetMap sh)
+(defun PdfLayout_LbdManualLoadXlsx (path / sheetMap sh layName)
   ;; 读 Excel：取当前布局分表（或第一个），按 LBD 号升序得到标签列表
   (setq *PdfLayout_LbdManualLabels* nil)
   (if (and path (/= path ""))
@@ -3867,11 +4073,23 @@
       (setq *PdfLayout_DlgXlsx* path)
       (PdfLayout_SaveSettings)
       (setq sheetMap (PdfLayout_ReadAllLbdLabels path))
-      (setq sh (if sheetMap
-                 (assoc (vla-get-Name (vla-get-ActiveLayout (vla-get-ActiveDocument (vlax-get-Acad-Object)))) sheetMap)
-                 nil))
-      (if (not sh) (setq sh (if (and *PdfLayout_LbdSheet* (assoc *PdfLayout_LbdSheet* sheetMap)) (assoc *PdfLayout_LbdSheet* sheetMap) nil)))
-      (if (not sh) (setq sh (if sheetMap (car sheetMap) nil)))
+      (setq layName (vla-get-Name (vla-get-ActiveLayout (vla-get-ActiveDocument (vlax-get-Acad-Object)))))
+      ;; 当前布局名 对应 表格列标题/分表名：去空格 + 忽略大小写匹配
+      (setq sh (if sheetMap (PdfLayout_AssocLoose layName sheetMap) nil))
+      (if (not sh)
+        (setq sh (if (and *PdfLayout_LbdSheet* sheetMap)
+                   (PdfLayout_AssocLoose *PdfLayout_LbdSheet* sheetMap) nil))
+      )
+      (if (not sh)
+        (progn
+          (if sheetMap
+            (princ (strcat "\n[提示] 标签表里没有和当前布局“" layName "”对应的列/分表，暂用第一个「"
+                           (car (car sheetMap)) "」；表里共 " (itoa (length sheetMap)) " 个名字，前几个："
+                           (PdfLayout_NamesBrief sheetMap)))
+          )
+          (setq sh (if sheetMap (car sheetMap) nil))
+        )
+      )
       (if sh (setq *PdfLayout_LbdSheet* (car sh)))
       (if sh
         (setq *PdfLayout_LbdManualLabels*
@@ -4064,7 +4282,7 @@
           (PdfLayout_SaveSettings)
           (setq sheetMap (PdfLayout_ReadAllLbdLabels xlPath))
           (setq sh (if sheetMap
-                       (assoc (vla-get-Name (vla-get-ActiveLayout (vla-get-ActiveDocument (vlax-get-Acad-Object)))) sheetMap)
+                       (PdfLayout_AssocLoose (vla-get-Name (vla-get-ActiveLayout (vla-get-ActiveDocument (vlax-get-Acad-Object)))) sheetMap)
                        nil))
           (if (not sh) (setq sh (if sheetMap (car sheetMap) nil)))
           (if sh
@@ -4256,7 +4474,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.29 已加载")
+  (princ "\n  MAP工具箱 v2.30 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -6489,7 +6707,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.29")
+(setq *PdfLayout_Version* "2.30")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
