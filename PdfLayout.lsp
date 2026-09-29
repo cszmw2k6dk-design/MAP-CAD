@@ -1,5 +1,5 @@
 ;;;=============================================================
-;;; MAP工具箱 PdfLayout.lsp  v2.30
+;;; MAP工具箱 PdfLayout.lsp  v2.31
 ;;;-------------------------------------------------------------
 ;;; 功能：识别模型空间已有图纸(PDFATTACH参考底图导入并摆放) →
 ;;;       复制模板布局(含图框) → 按可配置规则自动命名 →
@@ -141,10 +141,10 @@
 (setq *PdfLayout_SavedRegen* nil)
 (setq *PdfLayout_DclLines* (list
 "// PdfLayout.dcl"
-"// MAP工具箱 v2.30 - 对话框定义"
+"// MAP工具箱 v2.31 - 对话框定义"
 ""
 "PdfLayout : dialog {"
-"  label = \"MAP工具箱 v2.30\";"
+"  label = \"MAP工具箱 v2.31\";"
 "  width = 62;"
 ""
 "  : boxed_column {"
@@ -3434,7 +3434,7 @@
   (if pos
     (progn
       ;; ---- 带 LBD 前缀：从 LBD 之后第一个字母/数字起算，读到不合法字符为止 ----
-      (setq i (+ pos 3))
+      (setq i (+ pos 4))
       (while (and (<= i (strlen s)) (= (PdfLayout_CharKind (substr s i 1)) "O"))
         (setq i (1+ i))
       )
@@ -3442,7 +3442,7 @@
       (if (not (car r))
         (progn
           ;; 例如 "LBD TAG-15"：再退到第一个数字重试
-          (setq i (+ pos 3))
+          (setq i (+ pos 4))
           (while (and (<= i (strlen s)) (/= (PdfLayout_CharKind (substr s i 1)) "D"))
             (setq i (1+ i))
           )
@@ -3473,15 +3473,62 @@
   )
   out
 )
+(defun PdfLayout_LbdSegRuns (s / i n c runs cur kind nk)
+  ;; 把一个段拆成“字母块 / 数字块”列表，用于自然比较：
+  ;;   "D1" -> (("L" . "D") ("N" . 1))；"D12" -> (("L" . "D") ("N" . 12))；"POS" -> (("L" . "POS"))
+  (setq runs nil cur "" kind nil i 1 n (strlen s))
+  (while (<= i n)
+    (setq c (substr s i 1))
+    (setq nk (if (PdfLayout_LbdDigitsOnly c) "N" "L"))
+    (if (and kind (/= nk kind))
+      (progn
+        (setq runs (append runs (list (cons kind (if (= kind "N") (atoi cur) (strcase cur))))))
+        (setq cur "")
+      )
+    )
+    (setq kind nk cur (strcat cur c) i (1+ i))
+  )
+  (if (> (strlen cur) 0)
+    (setq runs (append runs (list (cons kind (if (= kind "N") (atoi cur) (strcase cur))))))
+  )
+  runs
+)
+
+(defun PdfLayout_LbdRunsCmp (ra rb / n i r ka kb a b)
+  ;; 按块比较：数字块排在字母块前；同类数字比数值、字母比字典序（忽略大小写）；
+  ;; 前面全相同则块少的在前。返回 -1/0/1
+  (setq n (min (length ra) (length rb)) i 0 r 0)
+  (while (and (< i n) (= r 0))
+    (setq ka (car (nth i ra)) kb (car (nth i rb)))
+    (cond
+      ((and (= ka "N") (= kb "L")) (setq r -1))
+      ((and (= ka "L") (= kb "N")) (setq r 1))
+      (t
+        (setq a (cdr (nth i ra)) b (cdr (nth i rb)))
+        (cond ((< a b) (setq r -1)) ((> a b) (setq r 1)) (t (setq r 0)))
+      )
+    )
+    (setq i (1+ i))
+  )
+  (if (/= r 0)
+    r
+    (cond ((< (length ra) (length rb)) -1) ((> (length ra) (length rb)) 1) (t 0))
+  )
+)
+
 (defun PdfLayout_LbdSegCmp (a b / na nb sa sb)
-  ;; 段比较：数字段排在字母段前，同类按值比。返回 -1/0/1
+  ;; 段比较：数字段排在字母段前；含字母的段按“字母块+数字块”自然比较
+  ;; （这样 D1 < D2 < D10，不会把 D10 排到 D2 前面）
   (setq na (eq (type a) 'STR) nb (eq (type b) 'STR))
   (cond
     ((and na (not nb)) 1)
     ((and nb (not na)) -1)
     (na
       (setq sa (strcase a) sb (strcase b))
-      (cond ((< sa sb) -1) ((= sa sb) 0) (t 1))
+      (if (= sa sb)
+        0
+        (PdfLayout_LbdRunsCmp (PdfLayout_LbdSegRuns a) (PdfLayout_LbdSegRuns b))
+      )
     )
     (t (cond ((< a b) -1) ((= a b) 0) (t 1)))
   )
@@ -4198,10 +4245,11 @@
 )
 
 (defun PdfLayout_LbdCopyAppearance (refE newE / refEd newEd grp entry)
-  ;; 把参考 MTEXT 的外观（字高/文字样式/颜色/背景/对齐）复制到 newE，保证新建标签与已有标签一致
+  ;; 把参考 MTEXT 的外观（字高/文字样式/颜色/背景/对齐/旋转）复制到 newE，保证新建标签与已有标签一致
+  ;; 50 = 旋转角(弧度)、11 = X 轴方向向量，这两个不复制的话旋转的参考标签带过来会变水平的
   (setq refEd (entget refE))
   (setq newEd (entget newE))
-  (foreach grp '(7 40 62 420 45 63 421 90 71 72 73)
+  (foreach grp '(7 40 50 11 62 420 45 63 421 90 71 72 73)
     (setq entry (assoc grp refEd))
     (if entry
       (progn
@@ -4474,7 +4522,7 @@
 )
 (setvar "FILEDIA" 1)
 (princ "\n=====================================")
-  (princ "\n  MAP工具箱 v2.30 已加载")
+  (princ "\n  MAP工具箱 v2.31 已加载")
 (princ "\n  命令: PDFLAYOUT    (对话框版)")
 (princ "\n  命令: PDFLBD      (识别底图LBD并填写标签)")
 (princ "\n  命令: PDFGRID      (批量生成N×M网格多行文字并自动命名)")
@@ -6707,7 +6755,7 @@
 ;;; 命令：PDFUPDATE 检查更新；PDFUPDATEDL 下载更新包；PDFUPDATEINST 下载并安装。
 ;;; 检测始终静默容错；下载与安装只有手动敲命令并回车确认后才会执行。
 ;;;-------------------------------------------------------------
-(setq *PdfLayout_Version* "2.30")
+(setq *PdfLayout_Version* "2.31")
 (setq *PdfLayout_UpdateUrl* "github:cszmw2k6dk-design/MAP-CAD@main")
 (setq *PdfLayout_CheckOnLoad* T)
 (setq *PdfLayout_CheckedSession* nil)
